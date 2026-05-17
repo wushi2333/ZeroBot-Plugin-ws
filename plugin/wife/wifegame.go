@@ -8,13 +8,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FloatTech/gg/factory"
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/control"
 	"github.com/FloatTech/zbputils/ctxext"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
 
-	"github.com/FloatTech/imgfactory"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -33,22 +34,26 @@ func init() {
 		card := cards[rand.Intn(len(cards))]
 		pic, err := engine.GetLazyData("wives/"+card, true)
 		if err != nil {
-			ctx.SendChain(message.Text("[猜老婆]error:\n", err))
-			return
+			logrus.Warnf("[wife] 猜老婆图片同步失败: %v，尝试读取本地文件...", err)
+			pic, err = engine.GetLazyData("wives/"+card, false)
+			if err != nil {
+				ctx.SendChain(message.Text("[猜老婆] 远程下载及本地读取图片均失败:\n", err))
+				return
+			}
 		}
 		work, name := card2name(card)
 		name = strings.ToLower(name)
 		img, _, err := image.Decode(bytes.NewReader(pic))
 		if err != nil {
-			ctx.SendChain(message.Text("[猜老婆]error:\n", err))
+			ctx.SendChain(message.Text("[猜老婆] 图片解码失败:\n", err))
 			return
 		}
-		dst := imgfactory.Size(img, img.Bounds().Dx(), img.Bounds().Dy())
+		dst := factory.Size(img, img.Bounds().Dx(), img.Bounds().Dy())
 		q, err := mosaic(dst, class)
 		if err != nil {
 			ctx.SendChain(
 				message.Reply(ctx.Event.MessageID),
-				message.Text("[猜老婆]图片生成失败:\n", err),
+				message.Text("[猜老婆] 图片生成失败:\n", err),
 			)
 			return
 		}
@@ -80,8 +85,6 @@ func init() {
 				)
 				return
 			case c := <-recv:
-				// tick.Reset(105 * time.Second)
-				// after.Reset(120 * time.Second)
 				msg := strings.ReplaceAll(c.Event.Message.String(), "酱", "")
 				if msg == "" {
 					continue
@@ -133,7 +136,7 @@ func init() {
 }
 
 // 高斯模糊生成
-func mosaic(dst *imgfactory.Factory, level int) ([]byte, error) {
+func mosaic(dst *factory.Factory, level int) ([]byte, error) {
 	blurRadius := float64(sizeList[level] * 3)
-	return imgfactory.ToBytes(dst.Blur(blurRadius).Image())
+	return factory.ToBytes(dst.Blur(blurRadius).Image())
 }

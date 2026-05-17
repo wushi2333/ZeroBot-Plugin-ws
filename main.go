@@ -104,6 +104,7 @@ import (
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/gif"               // 制图
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/github"            // 搜索GitHub仓库
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/guessmusic"        // 猜歌
+	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/handou"            // 猜成语
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/hitokoto"          // 一言
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/hs"                // 炉石
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/hyaku"             // 百人一首
@@ -130,6 +131,7 @@ import (
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/nsfw"              // nsfw图片识别
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/nwife"             // 本地老婆
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/omikuji"           // 浅草寺求签
+	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/pig"               // 来份猪猪
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/poker"             // 抽扑克
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/qqwife"            // 一群一天一夫一妻制群老婆
 	_ "github.com/FloatTech/ZeroBot-Plugin/plugin/qzone"             // qq空间表白墙
@@ -216,9 +218,10 @@ import (
 )
 
 type zbpcfg struct {
-	Z zero.Config        `json:"zero"`
-	W []*driver.WSClient `json:"ws"`
-	S []*driver.WSServer `json:"wss"`
+	Z               zero.Config        `json:"zero"`
+	W               []*driver.WSClient `json:"ws"`
+	S               []*driver.WSServer `json:"wss"`
+	ForceBase64File bool               `json:"force_base64_file"`
 }
 
 var config zbpcfg
@@ -243,6 +246,7 @@ func init() {
 	rsz := flag.Uint("r", 4096, "Receiving buffer ring size.")
 	maxpt := flag.Uint("x", 4, "Max process time (min).")
 	markmsg := flag.Bool("m", false, "Don't mark message as read automatically")
+	fb64 := flag.Bool("fb64", false, "Force to send base64 file.")
 	flag.BoolVar(&file.SkipOriginal, "mirror", false, "Use mirrored lazy data at first")
 
 	flag.Parse()
@@ -306,6 +310,7 @@ func init() {
 		MarkMessage:    !*markmsg,
 		Driver:         []zero.Driver{config.W[0]},
 	}
+	config.ForceBase64File = *fb64
 
 	if *save != "" {
 		f, err := os.Create(*save)
@@ -326,6 +331,7 @@ func main() {
 	if !strings.Contains(runtime.Version(), "go1.2") { // go1.20之前版本需要全局 seed，其他插件无需再 seed
 		rand.Seed(time.Now().UnixNano()) //nolint: staticcheck
 	}
+	message.SetForceBase64File(config.ForceBase64File)
 	// 帮助
 	zero.OnFullMatchGroup([]string{"help", "/help", ".help", "菜单"}, zero.OnlyToMe).SetBlock(true).
 		Handle(func(ctx *zero.Ctx) {
