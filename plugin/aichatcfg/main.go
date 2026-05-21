@@ -2,6 +2,10 @@
 package aichatcfg
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	
 	"github.com/sirupsen/logrus"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
@@ -46,7 +50,45 @@ var (
 	})
 )
 
+var agentCfgFile = filepath.Join("data", "aichat", "agent_char.json") // 专属配置文件路径
+
+func loadAgentCfg() {
+	b, err := os.ReadFile(agentCfgFile)
+	if err == nil {
+		var data struct {
+			Chars string `json:"chars"`
+			Sex   string `json:"sex"`
+		}
+		if json.Unmarshal(b, &data) == nil {
+			// 将读出的数据强制赋给底层 Agent 配置和全局 AC 变量
+			if data.Chars != "" {
+				chat.AgentCharConfig.Chars = data.Chars
+				chat.AC.AgentChar = data.Chars
+			}
+			if data.Sex != "" {
+				chat.AgentCharConfig.Sex = data.Sex
+				chat.AC.AgentSex = data.Sex
+			}
+		}
+	}
+}
+
+func saveAgentCfg() {
+	_ = os.MkdirAll(filepath.Dir(agentCfgFile), 0755)
+	data := struct {
+		Chars string `json:"chars"`
+		Sex   string `json:"sex"`
+	}{
+		Chars: chat.AgentCharConfig.Chars,
+		Sex:   chat.AgentCharConfig.Sex,
+	}
+	b, _ := json.Marshal(data)
+	_ = os.WriteFile(agentCfgFile, b, 0644)
+}
+
 func init() {
+	loadAgentCfg()
+
 	en.UsePreHandler(chat.EnsureConfig, func(ctx *zero.Ctx) bool {
 		k := zero.StateKeyPrefixKeep + "aichatcfg_stor__"
 		if _, ok := ctx.State[k]; ok {
@@ -97,12 +139,14 @@ func init() {
 	en.OnPrefix("设置AI聊天Agent性格", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetStr(&chat.AC.AgentChar), func(_ *zero.Ctx) {
 			chat.AgentCharConfig.Chars = chat.AC.AgentChar
+			saveAgentCfg()     // 【新增】：保存到本地专属文件
 			chat.ResetAgents()
 		})
 	en.OnPrefix("设置AI聊天Agent性别", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetStr(&chat.AC.AgentSex), func(_ *zero.Ctx) {
 			chat.AgentCharConfig.Sex = chat.AC.AgentSex
-			chat.ResetAgents()
+			saveAgentCfg()     // 【新增】：保存到本地专属文件
+			chat.ResetAgents() // 【新增】：清空旧 Agent 缓存
 		})
 	en.OnFullMatch("查看AI聊天系统提示词", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).Handle(func(ctx *zero.Ctx) {
 		ctx.SendChain(message.Text(chat.AC.SystemP))
@@ -131,6 +175,12 @@ func init() {
 			return
 		}
 		chat.ResetAgentCharConfig()
+		
+		chat.AC.AgentChar = chat.AgentCharConfig.Chars
+		chat.AC.AgentSex = chat.AgentCharConfig.Sex
+		saveAgentCfg()
+		chat.ResetAgents()
+		
 		err := c.SetExtra(&chat.AC)
 		if err != nil {
 			ctx.SendChain(message.Text("ERROR: set extra err: ", err))
