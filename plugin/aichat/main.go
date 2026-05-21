@@ -83,12 +83,21 @@ func init() {
 		logrus.Debugln("[aichat] agent mode test: noagent", stor.NoAgent(), "hasapi", chat.AC.AgentAPI != "", "hasmodel", chat.AC.AgentModelName != "")
 		if !stor.NoAgent() && chat.AC.AgentAPI != "" && chat.AC.AgentModelName != "" && chat.AC.Key != "" {
 			logrus.Debugln("[aichat] enter agent mode")
-			if chat.AgentCharConfig.Chars != chat.AC.AgentChar {
-			chat.AgentCharConfig.Chars = chat.AC.AgentChar
+			// ================= 终极修复：同步配置并清除失效的 Agent 缓存 =================
+			needReset := false
+			if chat.AC.AgentChar != "" && chat.AgentCharConfig.Chars != chat.AC.AgentChar {
+				chat.AgentCharConfig.Chars = chat.AC.AgentChar
+				needReset = true
 			}
-			if chat.AgentCharConfig.Sex != chat.AC.AgentSex {
+			if chat.AC.AgentSex != "" && chat.AgentCharConfig.Sex != chat.AC.AgentSex {
 				chat.AgentCharConfig.Sex = chat.AC.AgentSex
+				needReset = true
 			}
+			if needReset {
+				logrus.Debugln("[aichat] 检测到 Agent 配置不同步，更新内存并重置缓存")
+				chat.ResetAgents() // 关键：清空旧的 Agent 实例，迫使其使用新提示词重新生成！
+			}
+			// ===============================================================================
 			x := deepinfra.NewAPI(chat.AC.AgentAPI, string(chat.AC.AgentKey))
 			mod, err := chat.AC.Type.Protocol(chat.AC.AgentModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
 			if err != nil {
