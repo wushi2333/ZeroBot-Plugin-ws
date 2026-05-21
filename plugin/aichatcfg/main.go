@@ -97,10 +97,12 @@ func init() {
 	en.OnPrefix("设置AI聊天Agent性格", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetStr(&chat.AC.AgentChar), func(_ *zero.Ctx) {
 			chat.AgentCharConfig.Chars = chat.AC.AgentChar
+			chat.ResetAgents()
 		})
 	en.OnPrefix("设置AI聊天Agent性别", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetStr(&chat.AC.AgentSex), func(_ *zero.Ctx) {
 			chat.AgentCharConfig.Sex = chat.AC.AgentSex
+			chat.ResetAgents()
 		})
 	en.OnFullMatch("查看AI聊天系统提示词", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).Handle(func(ctx *zero.Ctx) {
 		ctx.SendChain(message.Text(chat.AC.SystemP))
