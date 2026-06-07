@@ -251,6 +251,14 @@ func getVideoSummary(cookiecfg *bz.CookieConfig, card bz.Card) (msg []message.Se
 }
 
 func getVideoDownload(cookiecfg *bz.CookieConfig, card bz.Card, cachePath string) (msg []message.Segment, err error) {
+	files, _ := os.ReadDir(cachePath)
+        for _, f := range files {
+                if info, _ := f.Info(); info != nil {
+                        if time.Since(info.ModTime()) > 24*time.Hour {
+                                _ = os.Remove(cachePath + f.Name())
+                        }
+                }
+        }
 	var (
 		data          []byte
 		videoDownload bz.VideoDownload
