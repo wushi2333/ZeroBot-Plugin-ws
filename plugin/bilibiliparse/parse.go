@@ -327,7 +327,12 @@ func getVideoDownload(cookiecfg *bz.CookieConfig, card bz.Card, cachePath string
 
         // 如果只有一个分片，直接重命名即可
         if len(partFiles) == 1 {
-                os.Rename(partFiles[0], videoFile)
+                if err = os.Rename(partFiles[0], videoFile); err != nil {
+      				for _, f := range partFiles {
+          			os.Remove(f)
+      				}
+     			 return
+  				}
         } else {
                 // 多分片：写入 concat 列表并合并
                 concatFile := fmt.Sprintf("%s%s_%s_concat.txt", cachePath, card.BvID, today)
