@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	
+
 	"github.com/sirupsen/logrus"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
@@ -139,7 +139,7 @@ func init() {
 	en.OnPrefix("设置AI聊天Agent性格", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetStr(&chat.AC.AgentChar), func(_ *zero.Ctx) {
 			chat.AgentCharConfig.Chars = chat.AC.AgentChar
-			saveAgentCfg()     // 【新增】：保存到本地专属文件
+			saveAgentCfg() // 【新增】：保存到本地专属文件
 			chat.ResetAgents()
 		})
 	en.OnPrefix("设置AI聊天Agent性别", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
@@ -175,12 +175,12 @@ func init() {
 			return
 		}
 		chat.ResetAgentCharConfig()
-		
+
 		chat.AC.AgentChar = chat.AgentCharConfig.Chars
 		chat.AC.AgentSex = chat.AgentCharConfig.Sex
 		saveAgentCfg()
 		chat.ResetAgents()
-		
+
 		err := c.SetExtra(&chat.AC)
 		if err != nil {
 			ctx.SendChain(message.Text("ERROR: set extra err: ", err))
