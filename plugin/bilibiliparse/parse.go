@@ -169,14 +169,12 @@ func handleVideo(ctx *zero.Ctx) {
 		}
 	}
 	ctx.SendChain(msg...)
-	if ok && c.GetData(ctx.Event.GroupID)&enableVideoDownload == enableVideoDownload {
-		downLoadMsg, err := getVideoDownload(cfg, card, cachePath)
-		if err != nil {
-			ctx.SendChain(message.Text("ERROR: ", err))
-			return
-		}
-		ctx.SendChain(downLoadMsg...)
-	}
+  	downLoadMsg, err := getVideoDownload(cfg, card, cachePath)
+  	if err != nil {
+      ctx.SendChain(message.Text("视频下载失败: ", err))
+  	} else {
+      ctx.SendChain(downLoadMsg...)
+  	}
 }
 
 func handleDynamic(ctx *zero.Ctx) {
