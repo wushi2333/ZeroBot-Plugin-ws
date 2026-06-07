@@ -290,7 +290,17 @@ func getVideoDownload(cookiecfg *bz.CookieConfig, card bz.Card, cachePath string
 	if err != nil {
 		return
 	}
-	headers := fmt.Sprintf("User-Agent: %s\nReferer: %s", ua, bilibiliparseReferer)
+	 const maxSize int64 = 1073741824
+        var totalSize int64
+        for _, d := range videoDownload.Data.Durl {
+                totalSize += int64(d.Size)
+        }
+        if totalSize > maxSize {
+                err = errors.Errorf("视频过大（%.1fGB），超过1GB限制，不予下载", float64(totalSize)/1073741824)
+                return
+        }
+
+        headers := fmt.Sprintf("User-Agent: %s\nReferer: %s", ua, bilibiliparseReferer)
 
         // 下载所有分片，逐个下载后合并
         partFiles := make([]string, 0, len(videoDownload.Data.Durl))
