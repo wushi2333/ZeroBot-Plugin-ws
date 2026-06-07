@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"strconv"
 
 	bz "github.com/FloatTech/AnimeAPI/bilibili"
 	"github.com/FloatTech/floatbox/file"
