@@ -290,14 +290,65 @@ func getVideoDownload(cookiecfg *bz.CookieConfig, card bz.Card, cachePath string
 		return
 	}
 	headers := fmt.Sprintf("User-Agent: %s\nReferer: %s", ua, bilibiliparseReferer)
-	// 限制最多下载8分钟视频
-	cmd := exec.Command("ffmpeg", "-ss", "0", "-t", "480", "-headers", headers, "-i", videoDownload.Data.Durl[0].URL, "-c", "copy", videoFile)
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	if err != nil {
-		err = errors.Errorf("未配置ffmpeg，%v", stderr)
-		return
-	}
-	msg = append(msg, message.Video("file:///"+file.BOTPATH+"/"+videoFile))
+
+        // 下载所有分片，逐个下载后合并
+        partFiles := make([]string, 0, len(videoDownload.Data.Durl))
+        var concatContent strings.Builder
+        totalMs := 0
+
+        for i, d := range videoDownload.Data.Durl {
+                // 限制最多下载30分钟视频
+                if totalMs >= 1800000 {
+                        break
+                }
+                partFile := fmt.Sprintf("%s%s_part%d_%s.mp4", cachePath, card.BvID, i, today)
+                partFiles = append(partFiles, partFile)
+                fmt.Fprintf(&concatContent, "file '%s'\n", partFile)
+
+                duration := d.Length / 1000
+                if totalMs+d.Length > 480000 {
+                        duration = (480000 - totalMs) / 1000
+                }
+                totalMs += d.Length
+
+                cmd := exec.Command("ffmpeg", "-headers", headers, "-i", d.URL,
+                        "-t", strconv.Itoa(duration), "-c", "copy", partFile)
+                cmd.Stderr = &stderr
+                if err = cmd.Run(); err != nil {
+                        // 清理已下载的临时文件
+                        for _, f := range partFiles {
+                                os.Remove(f)
+                        }
+                        err = errors.Errorf("下载视频分片失败，%v", stderr)
+                        return
+                }
+        }
+
+        // 如果只有一个分片，直接重命名即可
+        if len(partFiles) == 1 {
+                os.Rename(partFiles[0], videoFile)
+        } else {
+                // 多分片：写入 concat 列表并合并
+                concatFile := fmt.Sprintf("%s%s_%s_concat.txt", cachePath, card.BvID, today)
+                if err = os.WriteFile(concatFile, []byte(concatContent.String()), 0644); err != nil {
+                        return
+                }
+                cmd := exec.Command("ffmpeg", "-f", "concat", "-safe", "0", "-i", concatFile,
+                        "-c", "copy", videoFile)
+                cmd.Stderr = &stderr
+                if err = cmd.Run(); err != nil {
+                        err = errors.Errorf("合并视频分片失败，%v", stderr)
+                }
+                // 清理
+                for _, f := range partFiles {
+                        os.Remove(f)
+                }
+                os.Remove(concatFile)
+                if err != nil {
+                        return
+                }
+        }
+
+        msg = append(msg, message.Video("file:///"+file.BOTPATH+"/"+videoFile))
 	return
 }
