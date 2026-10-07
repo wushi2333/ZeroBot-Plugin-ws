@@ -189,6 +189,30 @@ func TestModelizeRolesAndNoSystem(t *testing.T) {
 	}
 }
 
+func TestClamp(t *testing.T) {
+	short := "好呀~"
+	if Clamp(short) != short {
+		t.Fatal("short reply must be unchanged")
+	}
+	// 在句末断开
+	long := strings.Repeat("这是一句话。", 40)
+	got := Clamp(long)
+	if n := len([]rune(got)); n > MaxReplyRunes || !strings.HasSuffix(got, "。") {
+		t.Fatalf("must cut at sentence end within limit, got %d runes: %q", n, got)
+	}
+	// 没有句号时在逗号处断开并加省略号
+	long = strings.Repeat("一二三四五六七八九，", 30)
+	got = Clamp(long)
+	if n := len([]rune(got)); n > MaxReplyRunes+1 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("must cut at comma with ellipsis, got %d runes: %q", n, got)
+	}
+	// 没有任何标点时硬截断
+	got = Clamp(strings.Repeat("字", 300))
+	if n := len([]rune(got)); n != MaxReplyRunes+1 {
+		t.Fatalf("hard cut must be %d runes incl. ellipsis, got %d", MaxReplyRunes+1, n)
+	}
+}
+
 func TestIsPass(t *testing.T) {
 	for _, s := range []string{"<pass>", " <PASS>\n", "嗯 <pass>"} {
 		if !IsPass(s) {

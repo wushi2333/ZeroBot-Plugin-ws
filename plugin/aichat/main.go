@@ -214,6 +214,10 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 		req.SetMemory(rc.Profile, rc.Items)
 	}
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	// 开启推理时推理 token 也计入 max_tokens, 此时不收紧以免正文被挤掉
+	if strings.EqualFold(chat.AC.ReasoningEffort, "none") && maxn > focus.MaxTokens {
+		maxn = focus.MaxTokens
+	}
 	txt := ""
 	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发
 	for try := 0; try < 2; try++ {
@@ -231,7 +235,7 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 			logrus.Debugln("[aichat] focus model chose to pass in", gid)
 			return
 		}
-		txt = chat.Sanitize(strings.Trim(data, "\n 　"))
+		txt = focus.Clamp(chat.Sanitize(strings.Trim(data, "\n 　")))
 		if !focus.LeaksAI(txt) {
 			break
 		}
