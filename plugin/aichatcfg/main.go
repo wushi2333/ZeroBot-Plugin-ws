@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	zero "github.com/wdvxdr1123/ZeroBot"
@@ -16,6 +18,7 @@ import (
 	"github.com/FloatTech/zbputils/ctxext"
 
 	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/focus"
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/memory"
 )
 
 var (
@@ -29,6 +32,10 @@ var (
 			"- 设置AI聊天(|识图|Agent)接口类型[OpenAI|OLLaMA|GenAI]\n" +
 			"- 设置AI聊天(不)使用Agent模式\n" +
 			"- 设置AI聊天(不)使用专注模式 (默认使用, 只回应触发的那句话)\n" +
+			"- 设置AI聊天(不)使用记忆 (默认使用, 仅专注模式下生效)\n" +
+			"- 查看我的AI记忆 | @bot 你记得我什么\n" +
+			"- 忘掉我的AI记忆\n" +
+			"- 查看本群AI记忆 | 清空本群AI记忆 (群管理)\n" +
 			"- 设置AI聊天(不)支持系统提示词\n" +
 			"- 设置AI聊天(|识图|Agent)接口地址https://api.siliconflow.cn/v1/chat/completions\n" +
 			"- 设置AI聊天(|识图|Agent)密钥xxx\n" +
@@ -74,6 +81,14 @@ func loadAgentCfg() {
 			}
 		}
 	}
+}
+
+// groupOf 私聊时返回 -uid
+func groupOf(ctx *zero.Ctx) int64 {
+	if ctx.Event.GroupID == 0 {
+		return -ctx.Event.UserID
+	}
+	return ctx.Event.GroupID
 }
 
 func saveAgentCfg() {
@@ -201,6 +216,58 @@ func init() {
 		Handle(ctxext.NewStorageSaveBoolHandler(chat.BitmapNagt))
 	en.OnRegex("^设置AI聊天(不)?使用专注模式$", zero.AdminPermission).SetBlock(true).
 		Handle(ctxext.NewStorageSaveBoolHandler(focus.BitmapNfcs))
+	en.OnRegex("^设置AI聊天(不)?使用记忆$", zero.AdminPermission).SetBlock(true).
+		Handle(ctxext.NewStorageSaveBoolHandler(memory.BitmapNmem))
+	showmine := func(ctx *zero.Ctx) {
+		profile, items := memory.About(groupOf(ctx), ctx.Event.UserID, 10)
+		if profile == "" && len(items) == 0 {
+			ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text("还没有关于你的记忆哦"))
+			return
+		}
+		sb := strings.Builder{}
+		if profile != "" {
+			sb.WriteString("【印象】")
+			sb.WriteString(profile)
+		}
+		for _, it := range items {
+			sb.WriteString("\n- ")
+			sb.WriteString(it)
+		}
+		ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text(strings.TrimSpace(sb.String())))
+	}
+	en.OnFullMatch("查看我的AI记忆").SetBlock(true).Handle(showmine)
+	en.OnFullMatch("你记得我什么", zero.OnlyToMe).SetBlock(true).Handle(showmine)
+	en.OnFullMatch("忘掉我的AI记忆").SetBlock(true).Handle(func(ctx *zero.Ctx) {
+		if err := memory.Forget(groupOf(ctx), ctx.Event.UserID); err != nil {
+			ctx.SendChain(message.Text("ERROR: ", err))
+			return
+		}
+		ctx.SendChain(message.Reply(ctx.Event.MessageID), message.Text("已经忘掉关于你的记忆了"))
+	})
+	en.OnFullMatch("查看本群AI记忆", zero.OnlyGroup, zero.AdminPermission).SetBlock(true).Handle(func(ctx *zero.Ctx) {
+		items, total, profiles := memory.Group(ctx.Event.GroupID, 20)
+		sb := strings.Builder{}
+		sb.WriteString("本群共有 ")
+		sb.WriteString(strconv.Itoa(total))
+		sb.WriteString(" 条日记、")
+		sb.WriteString(strconv.Itoa(profiles))
+		sb.WriteString(" 份人物印象")
+		if len(items) > 0 {
+			sb.WriteString("，最近的：")
+		}
+		for _, it := range items {
+			sb.WriteString("\n- ")
+			sb.WriteString(it)
+		}
+		ctx.SendChain(message.Text(sb.String()))
+	})
+	en.OnFullMatch("清空本群AI记忆", zero.OnlyGroup, zero.AdminPermission).SetBlock(true).Handle(func(ctx *zero.Ctx) {
+		if err := memory.Forget(ctx.Event.GroupID, 0); err != nil {
+			ctx.SendChain(message.Text("ERROR: ", err))
+			return
+		}
+		ctx.SendChain(message.Text("已清空本群的AI记忆"))
+	})
 	en.OnPrefix("设置AI聊天最大长度", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetUint(&chat.AC.MaxN))
 	en.OnPrefix("设置AI聊天TopP", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
@@ -227,6 +294,7 @@ func init() {
 					"• 温度：", stor.Temp(), "\n",
 					"• 以AI语音输出：", chat.ModelBool(!stor.NoRecord()), "\n",
 					"• 专注模式：", chat.ModelBool(focus.Uses(ctxext.Storage(stor))), "\n",
+					"• 长期记忆(专注模式下)：", chat.ModelBool(memory.Enabled(ctxext.Storage(stor))), "\n",
 					"• 使用Agent(专注模式关闭时)：", chat.ModelBool(!stor.NoAgent()), "\n",
 					"• 响应@：", chat.ModelBool(!stor.NoReplyAt()), "\n",
 				),

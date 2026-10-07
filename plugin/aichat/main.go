@@ -23,6 +23,7 @@ import (
 	"github.com/FloatTech/zbputils/ctxext"
 
 	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/focus"
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/memory"
 )
 
 var (
@@ -33,7 +34,8 @@ var (
 		Brief:            "大模型聊天和Agent",
 		Help: "- (随意聊天, 概率匹配)\n" +
 			"- 默认使用专注模式: 只回应@它(或被抽中)的那句话, 以该用户与它的对话为主要上下文, 群聊背景仅作低权重参考\n" +
-			"- 设置AI聊天(不)使用专注模式 (群管理, 不使用时恢复全群上下文/Agent)",
+			"- 设置AI聊天(不)使用专注模式 (群管理, 不使用时恢复全群上下文/Agent)\n" +
+			"- 专注模式下默认开启长期记忆(人物印象+日记), 见 aichatcfg 的记忆相关命令",
 
 		PrivateDataFolder: "aichat",
 	}).ApplySingle(single.New(
@@ -206,6 +208,11 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 	if req == nil {
 		return
 	}
+	usemem := memory.Enabled(ctxext.Storage(stor))
+	if usemem {
+		rc := memory.Get(gid, ctx.Event.UserID, req.Text())
+		req.SetMemory(rc.Profile, rc.Items)
+	}
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
 	txt := ""
 	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发
@@ -235,6 +242,9 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 		return
 	}
 	req.Done(txt)
+	if usemem {
+		memory.Observe(gid, ctx.Event.UserID, ctx.Event.Sender.Name(), req.Text(), txt)
+	}
 	chat.AddChatReply(gid, txt)
 	sendReply(ctx, stor, txt)
 }
