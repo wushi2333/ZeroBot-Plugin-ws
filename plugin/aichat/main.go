@@ -69,6 +69,10 @@ func init() {
 			(!stor.NoReplyAt() || (stor.NoReplyAt() && !ctx.Event.IsToMe))) {
 			return false
 		}
+		// 专注模式下: /指令交给插件; 已有插件回复过这条消息就不再插嘴
+		if focus.Uses(ctxext.Storage(stor)) && (focus.IsCommand(ctx) || focus.RepliedByOthers(ctx)) {
+			return false
+		}
 		rate := stor.Rate()
 		if !ctx.Event.IsToMe && rand.Intn(100) >= int(rate) {
 			return false
@@ -242,7 +246,7 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 		logrus.Infoln("[aichat] focus reply leaks AI identity, try", try+1, ":", txt)
 		txt = ""
 	}
-	if len(txt) == 0 {
+	if len(txt) == 0 || focus.RepliedByOthers(ctx) {
 		return
 	}
 	req.Done(txt)

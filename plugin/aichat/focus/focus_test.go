@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/fumiama/deepinfra/model"
+	zero "github.com/wdvxdr1123/ZeroBot"
+	"github.com/wdvxdr1123/ZeroBot/message"
 )
 
 func TestPersonaPassRuleOnlyWhenNotAtMe(t *testing.T) {
@@ -210,6 +213,35 @@ func TestClamp(t *testing.T) {
 	got = Clamp(strings.Repeat("字", 300))
 	if n := len([]rune(got)); n != MaxReplyRunes+1 {
 		t.Fatalf("hard cut must be %d runes incl. ellipsis, got %d", MaxReplyRunes+1, n)
+	}
+}
+
+func TestRepliedByOthersAndIsCommand(t *testing.T) {
+	ctx := &zero.Ctx{Event: &zero.Event{}, State: zero.State{}}
+	if RepliedByOthers(ctx) {
+		t.Fatal("no hook state means not replied")
+	}
+	b := &atomic.Bool{}
+	ctx.State[stateKeyReplied] = b
+	if RepliedByOthers(ctx) {
+		t.Fatal("fresh flag must be false")
+	}
+	b.Store(true)
+	if !RepliedByOthers(ctx) {
+		t.Fatal("flag set by another plugin's send must be seen")
+	}
+	if _, ok := sendActions["mark_msg_as_read"]; ok {
+		t.Fatal("marking as read is not a reply")
+	}
+
+	old := zero.BotConfig.CommandPrefix
+	zero.BotConfig.CommandPrefix = "/"
+	defer func() { zero.BotConfig.CommandPrefix = old }()
+	for txt, want := range map[string]bool{"/功能": true, " /aiwife": true, "功能": false, "今天吃啥": false} {
+		ctx.Event.Message = message.Message{message.Text(txt)}
+		if got := IsCommand(ctx); got != want {
+			t.Errorf("IsCommand(%q) = %v, want %v", txt, got, want)
+		}
 	}
 }
 

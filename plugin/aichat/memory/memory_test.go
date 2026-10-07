@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	zero "github.com/wdvxdr1123/ZeroBot"
+
 	"github.com/FloatTech/zbputils/chat"
 )
 
@@ -78,6 +80,35 @@ func TestCoreStripsQQVariants(t *testing.T) {
 	b := "枪杆子要握在手里（QQ 307554179）爱开玩笑，曾打趣问怎么把群主的钱转到自己账户。"
 	if s := Sim(a, b); s >= mergeSim/2 {
 		t.Fatalf("unrelated facts with （QQ 号） tag look similar: %.3f", s)
+	}
+}
+
+func TestFixSelfAndCutSentence(t *testing.T) {
+	if got := fixSelf("吃(1366348913)喜欢调戏机器人，还给这个bot发指令"); got != "吃(1366348913)喜欢调戏我，还给我发指令" {
+		t.Fatalf("fixSelf = %q", got)
+	}
+	s := "ForeverのSkywalker(3279980942)发现DeepSeek只要打断插嘴就容易唱歌。疑似对继续过敏，还说要写个脚本测一测到底是怎么回事"
+	got := cutsentence(s, entryLen)
+	if !strings.HasSuffix(got, "。") || len([]rune(got)) > entryLen {
+		t.Fatalf("must cut at sentence end within %d runes: %q", entryLen, got)
+	}
+}
+
+func TestDiaryPromptKnowsOwnerAndSelf(t *testing.T) {
+	usedb(t)
+	old := zero.BotConfig.SuperUsers
+	zero.BotConfig.SuperUsers = []int64{837145630}
+	defer func() { zero.BotConfig.SuperUsers = old }()
+	prompts := fakeLLM(t, `{"profile":"吃(1366348913)喜欢调戏机器人","memories":[]}`)
+	if err := writeConv(4, 1366348913, "吃", []string{"TA：a", "你：b"}); err != nil {
+		t.Fatal(err)
+	}
+	p := (*prompts)[0]
+	if !strings.Contains(p, "QQ号为 837145630 的人是你的主人") || !strings.Contains(p, "绝不能把自己写成机器人") {
+		t.Fatalf("diary prompt lacks owner/self rules:\n%s", p)
+	}
+	if profile, _ := About(4, 1366348913, 1); strings.Contains(profile, "机器人") {
+		t.Fatalf("stored profile still calls me a robot: %q", profile)
 	}
 }
 

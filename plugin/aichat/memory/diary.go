@@ -217,6 +217,30 @@ func selfname() string {
 	return "你"
 }
 
+// selfRules 写日记时的身份约定: 认得主人, 自称"我", 不把自己写成机器人
+func selfRules() string {
+	sb := strings.Builder{}
+	if len(zero.BotConfig.SuperUsers) > 0 {
+		sb.WriteString("QQ号为 ")
+		for i, o := range zero.BotConfig.SuperUsers {
+			if i > 0 {
+				sb.WriteString("、")
+			}
+			sb.WriteString(strconv.FormatInt(o, 10))
+		}
+		sb.WriteString(" 的人是你的主人，写到TA时要体现这一点。")
+	}
+	sb.WriteString("日记里提到你自己一律写\"我\"，不要写自己的名字；你是真人群友，绝不能把自己写成机器人、bot、AI或程序。\n")
+	return sb.String()
+}
+
+// selfbotre 兜底: 日记里把自己写成"机器人/bot"的说法改回"我"
+var selfbotre = regexp.MustCompile(`(?i)(这个|那个|群)?(机器人|bot)`)
+
+func fixSelf(s string) string {
+	return selfbotre.ReplaceAllString(s, "我")
+}
+
 type diaryItem struct {
 	Content    string `json:"content"`
 	Importance int64  `json:"importance"`
@@ -306,6 +330,7 @@ func writeConv(gid, uid int64, name string, turns []string) error {
 		old = "（还没有）"
 	}
 	prompt := "你是QQ群里的群友「" + selfname() + "」，正在写自己的私人日记，整理刚才和群友 " + who + " 的聊天。" + today(time.Now()) +
+		selfRules() +
 		"【你之前对TA的印象】\n" + old + "\n" +
 		"【你已经记得的相关的事】\n" + existingLines(es, uid, talk, 8) +
 		"【刚才的聊天】\n" + talk + "\n\n" +
@@ -359,6 +384,8 @@ func writeGroup(gid int64, lines []string) error {
 		return err
 	}
 	prompt := "你是QQ群里的群友「" + selfname() + "」，正在写日记，回顾群里最近的聊天，记下以后聊天可能用得上的群内信息。" + today(time.Now()) +
+		selfRules() +
+		"群聊总结只记以后还用得上的：外号、梗、长期的喜好和身份、计划约定、重要事件；一次性的提问、求推荐、临时讨论和水群不记。\n" +
 		"【你已经记得的群里的事】\n" + existingLines(es, 0, talk, 12) +
 		"【最近的群聊】（括号里是QQ号）\n" + talk + "\n\n" +
 		`请输出JSON：{"memories":[{"content":"...","importance":1,"uid":相关的人的QQ号，没有特定的人就填0}]}` + "\n" +

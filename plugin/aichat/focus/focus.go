@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -20,6 +21,7 @@ import (
 	zero "github.com/wdvxdr1123/ZeroBot"
 
 	"github.com/FloatTech/zbputils/ctxext"
+	"github.com/FloatTech/zbputils/vevent"
 )
 
 // BitmapNfcs 置 1 表示本群不使用专注模式 (aichatcfg 存储位)
@@ -129,7 +131,44 @@ var (
 	threads = map[threadkey]*thread{}
 )
 
+// stateKeyReplied 本条消息已被其他插件回复过 (*atomic.Bool)
+const stateKeyReplied = zero.StateKeyPrefixKeep + "_focus_replied__"
+
+// sendActions 视为"已回复"的 API: 只算真正发出消息/文件的动作
+var sendActions = map[string]struct{}{
+	"send_msg":                 {},
+	"send_group_msg":           {},
+	"send_private_msg":         {},
+	"send_group_forward_msg":   {},
+	"send_private_forward_msg": {},
+	"upload_group_file":        {},
+	"upload_private_file":      {},
+}
+
+// RepliedByOthers 本条消息是否已经被其他插件处理并发出过消息/操作.
+// ZeroBot 按优先级依次执行匹配器, AI 聊天优先级最低, 轮到它时前面插件的同步发送都已完成.
+func RepliedByOthers(ctx *zero.Ctx) bool {
+	b, ok := ctx.State[stateKeyReplied].(*atomic.Bool)
+	return ok && b.Load()
+}
+
+// IsCommand 消息是否是以命令前缀开头的指令 (如 /功能), 指令交给插件, AI 不接
+func IsCommand(ctx *zero.Ctx) bool {
+	p := zero.BotConfig.CommandPrefix
+	return p != "" && strings.HasPrefix(strings.TrimSpace(ctx.ExtractPlainText()), p)
+}
+
 func init() {
+	// 给每条消息挂一个 API 调用钩子, 记录是否有插件已经回复过
+	zero.OnMessage().FirstPriority().SetBlock(false).Handle(func(ctx *zero.Ctx) {
+		replied := &atomic.Bool{}
+		ctx.State[stateKeyReplied] = replied
+		vevent.HookCtxCaller(ctx, vevent.NewAPICallerReturnHook(ctx, func(req zero.APIRequest, _ zero.APIResponse, err error) {
+			if _, ok := sendActions[req.Action]; ok && err == nil {
+				replied.Store(true)
+			}
+		}))
+	})
 	// 记录所有群/私聊的纯文本消息作为背景, 每群只保留最近几条
 	zero.OnMessage(func(ctx *zero.Ctx) bool {
 		return ctx.Event.Sender != nil && strings.TrimSpace(ctx.ExtractPlainText()) != ""

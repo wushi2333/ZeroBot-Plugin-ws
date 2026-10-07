@@ -215,6 +215,29 @@ func cutrunes(s string, n int) string {
 	return string([]rune(s)[:n])
 }
 
+// cutsentence 超长时尽量在句末/逗号处截断, 避免半句话
+func cutsentence(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	rs := []rune(s)
+	if len(rs) <= n {
+		return s
+	}
+	cut := rs[:n]
+	for i := len(cut) - 1; i >= n/2; i-- {
+		switch cut[i] {
+		case '。', '！', '？', '；', '!', '?', ';':
+			return string(cut[:i+1])
+		}
+	}
+	for i := len(cut) - 1; i >= n/2; i-- {
+		switch cut[i] {
+		case '，', ',', '、':
+			return string(cut[:i])
+		}
+	}
+	return string(cut)
+}
+
 func ago(now, ts int64) string {
 	d := days(now, ts)
 	switch {
@@ -283,7 +306,7 @@ func Get(gid, uid int64, text string) (rc Recall) {
 
 // remember 写入一条新事实, 与相似旧条目合并. 必须持有 dbmu
 func remember(gid, uid int64, content string, importance int64, now int64, es []*Entry) ([]*Entry, error) {
-	content = cutrunes(content, entryLen)
+	content = cutsentence(fixSelf(content), entryLen)
 	if content == "" || rejected(content) {
 		return es, nil
 	}
@@ -334,7 +357,7 @@ func newid() int64 {
 
 // setProfile 必须持有 dbmu
 func setProfile(gid, uid int64, name, text string, now int64) error {
-	text = cutrunes(text, profileLen)
+	text = cutsentence(fixSelf(text), profileLen)
 	if text == "" || rejected(text) {
 		return nil
 	}
