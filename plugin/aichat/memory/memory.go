@@ -126,11 +126,14 @@ func profileOf(gid, uid int64) (Profile, bool) {
 
 // ---------- 相似度: 中文二字词 (bigram) 集合的余弦 ----------
 
+// qqtag 匹配各种写法的 QQ 号标注: (123) （QQ 123） (QQ号：123) (qq123)
+const qqtag = `[(（]\s*(?:qq)?\s*号?\s*[:：]?\s*\d{4,}\s*[)）]`
+
 var (
 	// subjre 条目开头的 "名字(QQ号)" 主语
-	subjre = regexp.MustCompile(`^[^\n]{0,20}?[(（]\d{4,}[)）]`)
-	// qqre 其余位置的 (QQ号)
-	qqre = regexp.MustCompile(`[(（]\d{4,}[)）]`)
+	subjre = regexp.MustCompile(`(?i)^[^\n]{0,20}?` + qqtag)
+	// qqre 其余位置的 (QQ号), 以及不带括号的 "QQ 123"
+	qqre = regexp.MustCompile(`(?i)` + qqtag + `|qq\s*号?\s*[:：]?\s*\d{4,}`)
 )
 
 // core 去掉人名与 QQ 号, 只留内容本身.

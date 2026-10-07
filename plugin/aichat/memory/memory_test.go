@@ -61,6 +61,26 @@ func TestSimilarity(t *testing.T) {
 	}
 }
 
+// 线上真实出现过的各种 QQ 号写法都必须被剥离
+func TestCoreStripsQQVariants(t *testing.T) {
+	for _, s := range []string{
+		"枪杆子要握在手里（QQ 307554179）对羊排做法感兴趣",
+		"枪杆子要握在手里(QQ号：307554179)对羊排做法感兴趣",
+		"枪杆子要握在手里(qq307554179)对羊排做法感兴趣",
+		"枪杆子要握在手里（307554179）对羊排做法感兴趣",
+		"QQ 307554179对羊排做法感兴趣",
+	} {
+		if c := core(s); strings.ContainsAny(c, "0123456789") || strings.Contains(strings.ToLower(c), "qq") {
+			t.Errorf("core(%q) = %q, QQ tag not stripped", s, c)
+		}
+	}
+	a := "枪杆子要握在手里（QQ 307554179）对羊排做法感兴趣，问过炖和烤两种去膻方法。"
+	b := "枪杆子要握在手里（QQ 307554179）爱开玩笑，曾打趣问怎么把群主的钱转到自己账户。"
+	if s := Sim(a, b); s >= mergeSim/2 {
+		t.Fatalf("unrelated facts with （QQ 号） tag look similar: %.3f", s)
+	}
+}
+
 func TestDistinctFactsAboutSamePersonNotMerged(t *testing.T) {
 	usedb(t)
 	fakeLLM(t, `{"profile":"","memories":[{"content":"吃(1366348913)下周四考高数","importance":2},{"content":"吃(1366348913)最喜欢鸣潮的长离","importance":1}]}`)
