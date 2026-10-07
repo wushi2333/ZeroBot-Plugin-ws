@@ -19,6 +19,8 @@ import (
 
 	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/focus"
 	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/memory"
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/shortctx"
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/websearch"
 )
 
 var (
@@ -33,6 +35,9 @@ var (
 			"- 设置AI聊天(不)使用Agent模式\n" +
 			"- 设置AI聊天(不)使用专注模式 (默认使用, 只回应触发的那句话)\n" +
 			"- 设置AI聊天(不)使用记忆 (默认使用, 仅专注模式下生效)\n" +
+			"- 设置AI聊天(不)使用群聊上下文 (超级用户, 默认关闭: 最近约200条群聊原文+12小时摘要)\n" +
+			"- 设置AI聊天思考强度[no|low|high] (超级用户, 按群设置, 默认no不思考)\n" +
+			"- 设置AI聊天(不)使用联网搜索 (超级用户, 默认使用: 被@时遇到不知道的事会先上网查)\n" +
 			"- 查看我的AI记忆 | @bot 你记得我什么\n" +
 			"- 忘掉我的AI记忆\n" +
 			"- 查看本群AI记忆 | 清空本群AI记忆 (群管理)\n" +
@@ -53,7 +58,7 @@ var (
 			"- 设置AI聊天最大长度4096\n" +
 			"- 设置AI聊天TopP 0.9\n" +
 			"- 设置AI聊天(不)以AI语音输出\n" +
-			"- 设置AI聊天努力度none(留空则清除)\n" +
+			"- 设置AI聊天努力度none(留空则清除, 全局, AI聊天已改用按群的思考强度)\n" +
 			"- 查看AI聊天配置\n" +
 			"- 重置AI聊天Agent\n" +
 			"- 重置AI聊天\n",
@@ -81,6 +86,14 @@ func loadAgentCfg() {
 			}
 		}
 	}
+}
+
+// effortName 思考强度的显示名
+func effortName(e string) string {
+	if e == "none" {
+		return "no (不思考)"
+	}
+	return e
 }
 
 // groupOf 私聊时返回 -uid
@@ -218,6 +231,54 @@ func init() {
 		Handle(ctxext.NewStorageSaveBoolHandler(focus.BitmapNfcs))
 	en.OnRegex("^设置AI聊天(不)?使用记忆$", zero.AdminPermission).SetBlock(true).
 		Handle(ctxext.NewStorageSaveBoolHandler(memory.BitmapNmem))
+	// 群聊上下文默认关闭, 只有超级用户能在群里开启 (位为 1 表示开启, 与其他"不使用"位相反)
+	en.OnRegex("^设置AI聊天(不)?使用群聊上下文$", zero.OnlyGroup, zero.SuperUserPermission).SetBlock(true).
+		Handle(func(ctx *zero.Ctx) {
+			on := ctx.State["regex_matched"].([]string)[1] != "不"
+			gid := ctx.Event.GroupID
+			stor, err := ctxext.NewStorage(ctx, gid)
+			if err != nil {
+				ctx.SendChain(message.Text("ERROR: ", err))
+				return
+			}
+			v := int64(0)
+			if on {
+				v = 1
+			}
+			if err := stor.Set(v, shortctx.BitmapGctx).SaveTo(ctx, gid); err != nil {
+				ctx.SendChain(message.Text("ERROR: set data err: ", err))
+				return
+			}
+			if on {
+				ctx.SendChain(message.Text("本群已开启群聊上下文"))
+				return
+			}
+			ctx.SendChain(message.Text("本群已关闭群聊上下文"))
+		})
+	en.OnRegex("^设置AI聊天(不)?使用联网搜索$", zero.SuperUserPermission).SetBlock(true).
+		Handle(ctxext.NewStorageSaveBoolHandler(websearch.BitmapNsrch))
+	// 思考强度按群设置, 只有超级用户能改; 默认 no (不思考)
+	en.OnRegex(`^设置AI聊天思考强度\s*(?i:(no|none|low|high))$`, zero.OnlyGroup, zero.SuperUserPermission).SetBlock(true).
+		Handle(func(ctx *zero.Ctx) {
+			lv := strings.ToLower(ctx.State["regex_matched"].([]string)[1])
+			v := int64(0)
+			for i, e := range focus.Efforts {
+				if e == lv {
+					v = int64(i)
+				}
+			}
+			gid := ctx.Event.GroupID
+			stor, err := ctxext.NewStorage(ctx, gid)
+			if err != nil {
+				ctx.SendChain(message.Text("ERROR: ", err))
+				return
+			}
+			if err := stor.Set(v, focus.BitmapEffort).SaveTo(ctx, gid); err != nil {
+				ctx.SendChain(message.Text("ERROR: set data err: ", err))
+				return
+			}
+			ctx.SendChain(message.Text("本群AI聊天思考强度已设为 ", effortName(focus.Efforts[v])))
+		})
 	showmine := func(ctx *zero.Ctx) {
 		profile, items := memory.About(groupOf(ctx), ctx.Event.UserID, 10)
 		if profile == "" && len(items) == 0 {
@@ -295,6 +356,9 @@ func init() {
 					"• 以AI语音输出：", chat.ModelBool(!stor.NoRecord()), "\n",
 					"• 专注模式：", chat.ModelBool(focus.Uses(ctxext.Storage(stor))), "\n",
 					"• 长期记忆(专注模式下)：", chat.ModelBool(memory.Enabled(ctxext.Storage(stor))), "\n",
+					"• 群聊上下文(专注模式下)：", chat.ModelBool(shortctx.Enabled(ctxext.Storage(stor))), "\n",
+					"• 思考强度：", effortName(focus.Effort(ctxext.Storage(stor))), "\n",
+					"• 联网搜索(专注模式下被@时)：", chat.ModelBool(websearch.Enabled(ctxext.Storage(stor))), "\n",
 					"• 使用Agent(专注模式关闭时)：", chat.ModelBool(!stor.NoAgent()), "\n",
 					"• 响应@：", chat.ModelBool(!stor.NoReplyAt()), "\n",
 				),

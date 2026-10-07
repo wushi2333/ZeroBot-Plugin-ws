@@ -4,7 +4,9 @@ package aichat
 import (
 	"encoding/json"
 	"math/rand"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/RomiChan/syncx"
 	"github.com/fumiama/deepinfra"
@@ -24,6 +26,8 @@ import (
 
 	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/focus"
 	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/memory"
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/shortctx"
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/websearch"
 )
 
 var (
@@ -35,7 +39,8 @@ var (
 		Help: "- (随意聊天, 概率匹配)\n" +
 			"- 默认使用专注模式: 只回应@它(或被抽中)的那句话, 以该用户与它的对话为主要上下文, 群聊背景仅作低权重参考\n" +
 			"- 设置AI聊天(不)使用专注模式 (群管理, 不使用时恢复全群上下文/Agent)\n" +
-			"- 专注模式下默认开启长期记忆(人物印象+日记), 见 aichatcfg 的记忆相关命令",
+			"- 专注模式下默认开启长期记忆(人物印象+日记), 见 aichatcfg 的记忆相关命令\n" +
+			"- 专注模式下能看图: 当前消息/引用消息里的图, 或先发图再@它问",
 
 		PrivateDataFolder: "aichat",
 	}).ApplySingle(single.New(
@@ -65,12 +70,15 @@ func init() {
 			logrus.Infoln("[aichat] skip agent for ctx has not been hooked by agent")
 			return false
 		}
-		if !(ctx.ExtractPlainText() != "" &&
+		usefocus := focus.Uses(ctxext.Storage(stor))
+		// 专注模式下 @它 只发图也接
+		hascontent := ctx.ExtractPlainText() != "" || (usefocus && ctx.Event.IsToMe && focus.HasImage(ctx))
+		if !(hascontent &&
 			(!stor.NoReplyAt() || (stor.NoReplyAt() && !ctx.Event.IsToMe))) {
 			return false
 		}
 		// 专注模式下: /指令交给插件; 已有插件回复过这条消息就不再插嘴
-		if focus.Uses(ctxext.Storage(stor)) && (focus.IsCommand(ctx) || focus.RepliedByOthers(ctx)) {
+		if usefocus && (focus.IsCommand(ctx) || focus.RepliedByOthers(ctx)) {
 			return false
 		}
 		rate := stor.Rate()
@@ -89,10 +97,11 @@ func init() {
 		stor := ctx.State[zero.StateKeyPrefixKeep+"aichatcfg_stor__"].(chat.Storage)
 		temperature := stor.Temp()
 		topp, maxn := chat.AC.MParams()
+		effort := focus.Effort(ctxext.Storage(stor)) // 按群设置, 默认不思考
 		mp := ctx.State[control.StateKeySyncxState].(*syncx.Map[string, any])
 
 		if focus.Uses(ctxext.Storage(stor)) {
-			focusChat(ctx, stor, gid, temperature, topp, maxn)
+			focusChat(ctx, stor, gid, temperature, topp, effort)
 			return
 		}
 
@@ -115,7 +124,7 @@ func init() {
 			}
 			// ===============================================================================
 			x := deepinfra.NewAPI(chat.AC.AgentAPI, string(chat.AC.AgentKey))
-			mod, err := chat.AC.Type.Protocol(chat.AC.AgentModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
+			mod, err := chat.AC.Type.Protocol(chat.AC.AgentModelName, temperature, topp, maxn, effort)
 			if err != nil {
 				logrus.Warnln("ERROR: ", err)
 				return
@@ -178,7 +187,7 @@ func init() {
 		}
 
 		x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
-		mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
+		mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, effort)
 		if err != nil {
 			logrus.Warnln("ERROR: ", err)
 			return
@@ -198,7 +207,7 @@ func init() {
 }
 
 // focusChat 专注模式: 只回应当前这句话, 群聊背景仅作低权重参考
-func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp float32, maxn uint) {
+func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp float32, effort string) {
 	char := chat.AC.AgentChar
 	if char == "" {
 		char = chat.AgentCharConfig.Chars
@@ -212,6 +221,9 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 	if req == nil {
 		return
 	}
+	if ctx.Event.GroupID != 0 && shortctx.Enabled(ctxext.Storage(stor)) {
+		req.SetContext(shortctx.Context(ctx, gid))
+	}
 	if ctx.Event.GroupID != 0 && ctx.Event.IsToMe {
 		req.AddGroupRules(zero.AdminPermission(ctx))
 	}
@@ -220,25 +232,63 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 		rc := memory.Get(gid, ctx.Event.UserID, req.Text())
 		req.SetMemory(rc.Profile, rc.Items)
 	}
+	if ctx.Event.IsToMe && websearch.Enabled(ctxext.Storage(stor)) {
+		req.EnableSearch()
+	}
+	req.LoadImages()
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
-	// 开启推理时推理 token 也计入 max_tokens, 此时不收紧以免正文被挤掉
-	if strings.EqualFold(chat.AC.ReasoningEffort, "none") && maxn > focus.MaxTokens {
-		maxn = focus.MaxTokens
+	// 默认的 http.DefaultClient 没有超时, 接口卡住会让本群一直不回话
+	timeout := 60 * time.Second
+	if effort != "none" {
+		timeout = 120 * time.Second
+	}
+	x.SetHTTPClient(&http.Client{Timeout: timeout})
+	ask := func() (string, error) {
+		eff := effort
+		for {
+			mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, focus.MaxTokensFor(eff), eff)
+			if err != nil {
+				return "", err
+			}
+			data, err := x.Request(req.Modelize(mod))
+			if err != nil && req.HasImages() {
+				// 模型不支持识图时去掉图片, 按文字再试一次
+				logrus.Warnln("[aichat] focus post with images err:", err, ", retry without images")
+				req.DropImages()
+				continue
+			}
+			if err == nil && strings.TrimSpace(data) == "" && eff != "none" {
+				// 思考把预算用完了, 正文为空: 不思考再试一次
+				logrus.Infoln("[aichat] focus empty reply with effort", eff, "in", gid, ", retry without thinking")
+				eff = "none"
+				continue
+			}
+			return data, err
+		}
 	}
 	txt := ""
 	var acts []focus.Action
-	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发
+	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发; 搜索那一轮不算重试
 	for try := 0; try < 2; try++ {
-		mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
-		if err != nil {
-			logrus.Warnln("ERROR: ", err)
-			return
-		}
-		data, err := x.Request(req.Modelize(mod))
+		data, err := ask()
 		if err != nil {
 			logrus.Warnln("[aichat] focus post err:", err)
 			return
 		}
+		if q, ok := req.SearchQuery(data); ok {
+			res := ""
+			rs, err := websearch.Search(q)
+			if err != nil {
+				logrus.Warnln("[aichat] focus web search", q, "err:", err)
+			} else {
+				res = websearch.Format(rs)
+			}
+			logrus.Infoln("[aichat] focus web search in", gid, ":", q, "got", len(rs), "results")
+			req.SetSearchResult(q, res)
+			try--
+			continue
+		}
+		data = focus.StripSearch(data)
 		if focus.IsPass(data) {
 			logrus.Debugln("[aichat] focus model chose to pass in", gid)
 			return

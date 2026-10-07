@@ -281,7 +281,7 @@ func TestRenderTextAndCanTarget(t *testing.T) {
 		{Type: "at", Data: map[string]string{"qq": "1001", "name": "@RinDB"}},
 		message.Text("十分钟"),
 	}}, State: zero.State{}}
-	txt, mentions, labels := renderText(ctx)
+	txt, mentions, labels := renderText(ctx, &imgset{})
 	if txt != "禁言 @RinDB(1001) 十分钟" || len(labels) != 1 || labels[0] != "RinDB(1001)" {
 		t.Fatalf("unexpected rendered text %q labels %v", txt, labels)
 	}
@@ -295,20 +295,63 @@ func TestRenderTextAndCanTarget(t *testing.T) {
 }
 
 func TestAddGroupRules(t *testing.T) {
-	r := &Request{mentions: []int64{2934812955}, mentionlabels: []string{"ghost(2934812955)"}}
+	r := &Request{persona: "人设", mentions: []int64{2934812955}, mentionlabels: []string{"ghost(2934812955)"}}
 	r.AddGroupRules(true)
-	if !strings.Contains(r.persona, "<ban 序号") || !strings.Contains(r.persona, "1. ghost(2934812955)") {
-		t.Fatalf("admins must get numbered targets:\n%s", r.persona)
+	fu := r.finalUser()
+	if !strings.Contains(fu, "<ban 序号") || !strings.Contains(fu, "1. ghost(2934812955)") {
+		t.Fatalf("admins must get numbered targets:\n%s", fu)
+	}
+	if r.persona != "人设" {
+		t.Fatal("per-requester rules must not touch the system prompt (prefix cache)")
 	}
 	r = &Request{}
 	r.AddGroupRules(true)
-	if !strings.Contains(r.persona, "没有@任何人") {
+	if !strings.Contains(r.finalUser(), "没有@任何人") {
 		t.Fatal("admin without targets must be told nothing can be done")
 	}
 	r = &Request{mentions: []int64{1001}, mentionlabels: []string{"RinDB(1001)"}}
 	r.AddGroupRules(false)
-	if strings.Contains(r.persona, "<ban") || !strings.Contains(r.persona, "不要假装已经禁言") {
+	if fu := r.finalUser(); strings.Contains(fu, "<ban") || !strings.Contains(fu, "不要假装已经禁言") {
 		t.Fatal("ordinary members must not get ban instructions")
+	}
+}
+
+func TestContextOrderingForCache(t *testing.T) {
+	r := &Request{
+		persona: "人设",
+		thread:  []turn{{text: "早"}, {isbot: true, text: "早呀"}},
+		bg:      []bgline{{uid: 1, name: "甲", text: "背景"}},
+		sender:  "丙(3)", text: "他刚才说啥", isatme: true,
+	}
+	r.SetContext("【最近的群聊记录】\n21:00 甲(1)：今晚打鸣潮")
+	r.AddGroupRules(false)
+	p := model.NewOpenAI("m", "", 0.7, 0.9, 100, "none")
+	_ = r.Modelize(p)
+	var body struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(p.Body()).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	roles := ""
+	for _, m := range body.Messages {
+		roles += m.Role + ","
+	}
+	if roles != "system,user,assistant,user,assistant,user," {
+		t.Fatalf("want system,context,ack,thread...,final; got %s", roles)
+	}
+	if !strings.Contains(body.Messages[0].Content, "【群聊上下文】") || !strings.Contains(body.Messages[1].Content, "今晚打鸣潮") {
+		t.Fatal("context rules must be in system, context right after it")
+	}
+	last := body.Messages[len(body.Messages)-1].Content
+	if strings.Contains(last, "【群聊背景") {
+		t.Fatal("small background must be dropped when full context is present")
+	}
+	if !strings.Contains(last, "不要假装已经禁言") || !strings.HasSuffix(last, reminder) {
+		t.Fatal("per-requester rules belong at the end of the final message")
 	}
 }
 
