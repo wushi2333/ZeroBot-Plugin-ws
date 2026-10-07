@@ -139,8 +139,9 @@ var (
 // 序号对不上的标记直接丢弃.
 func (r *Request) ParseActions(s string) (string, []Action) {
 	ts := r.targets()
-	var acts []Action
-	for _, m := range actionre.FindAllStringSubmatch(s, 3) {
+	ms := actionre.FindAllStringSubmatch(s, 3)
+	acts := make([]Action, 0, len(ms))
+	for _, m := range ms {
 		idx, err := strconv.Atoi(m[2])
 		if err != nil || idx < 1 || idx > len(ts) {
 			continue
