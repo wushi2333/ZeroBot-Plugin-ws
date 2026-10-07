@@ -20,6 +20,9 @@ import (
 	ctrl "github.com/FloatTech/zbpctrl"
 	"github.com/FloatTech/zbputils/chat"
 	"github.com/FloatTech/zbputils/control"
+	"github.com/FloatTech/zbputils/ctxext"
+
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/focus"
 )
 
 var (
@@ -28,7 +31,9 @@ var (
 		DisableOnDefault: false,
 		Extra:            control.ExtraFromString("aichat"),
 		Brief:            "大模型聊天和Agent",
-		Help:             "- (随意聊天, 概率匹配)",
+		Help: "- (随意聊天, 概率匹配)\n" +
+			"- 默认使用专注模式: 只回应@它(或被抽中)的那句话, 以该用户与它的对话为主要上下文, 群聊背景仅作低权重参考\n" +
+			"- 设置AI聊天(不)使用专注模式 (群管理, 不使用时恢复全群上下文/Agent)",
 
 		PrivateDataFolder: "aichat",
 	}).ApplySingle(single.New(
@@ -54,7 +59,7 @@ func init() {
 			return false
 		}
 		mp := ctx.State[control.StateKeySyncxState].(*syncx.Map[string, any])
-		if _, ok := mp.Load(chat.StateKeyAgentHooked); !ok && !stor.NoAgent() {
+		if _, ok := mp.Load(chat.StateKeyAgentHooked); !ok && !stor.NoAgent() && !focus.Uses(ctxext.Storage(stor)) {
 			logrus.Infoln("[aichat] skip agent for ctx has not been hooked by agent")
 			return false
 		}
@@ -79,6 +84,11 @@ func init() {
 		temperature := stor.Temp()
 		topp, maxn := chat.AC.MParams()
 		mp := ctx.State[control.StateKeySyncxState].(*syncx.Map[string, any])
+
+		if focus.Uses(ctxext.Storage(stor)) {
+			focusChat(ctx, stor, gid, temperature, topp, maxn)
+			return
+		}
 
 		logrus.Debugln("[aichat] agent mode test: noagent", stor.NoAgent(), "hasapi", chat.AC.AgentAPI != "", "hasmodel", chat.AC.AgentModelName != "")
 		if !stor.NoAgent() && chat.AC.AgentAPI != "" && chat.AC.AgentModelName != "" && chat.AC.Key != "" {
@@ -176,35 +186,79 @@ func init() {
 		txt := chat.Sanitize(strings.Trim(data, "\n 　"))
 		if len(txt) > 0 {
 			chat.AddChatReply(gid, txt)
-			nick := zero.BotConfig.NickName[rand.Intn(len(zero.BotConfig.NickName))]
-			txt = strings.ReplaceAll(txt, "{name}", ctx.CardOrNickName(ctx.Event.UserID))
-			txt = strings.ReplaceAll(txt, "{me}", nick)
-			id := any(nil)
-			if ctx.Event.IsToMe {
-				id = ctx.Event.MessageID
-			}
-			for _, t := range strings.Split(txt, "{segment}") {
-				if t == "" {
-					continue
-				}
-				logrus.Debugln("[aichat] 回复内容:", t)
-				recCfg := airecord.GetConfig()
-				record := ""
-				if !fastfailnorecord && !stor.NoRecord() {
-					record = ctx.GetAIRecord(recCfg.ModelID, recCfg.Customgid, t)
-					if record != "" {
-						ctx.SendChain(message.Record(record))
-						continue
-					}
-					fastfailnorecord = true
-				}
-				if id != nil {
-					id = ctx.SendChain(message.Reply(id), message.Text(t))
-				} else {
-					id = ctx.SendChain(message.Text(t))
-				}
-				process.SleepAbout1sTo2s()
-			}
+			sendReply(ctx, stor, txt)
 		}
 	})
+}
+
+// focusChat 专注模式: 只回应当前这句话, 群聊背景仅作低权重参考
+func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp float32, maxn uint) {
+	char := chat.AC.AgentChar
+	if char == "" {
+		char = chat.AgentCharConfig.Chars
+	}
+	sex := chat.AC.AgentSex
+	if sex == "" {
+		sex = chat.AgentCharConfig.Sex
+	}
+	persona := focus.Persona(zero.BotConfig.NickName[0], sex, char, ctx.Event.IsToMe)
+	req := focus.NewRequest(ctx, persona, bool(chat.AC.NoSystemP))
+	if req == nil {
+		return
+	}
+	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
+	if err != nil {
+		logrus.Warnln("ERROR: ", err)
+		return
+	}
+	data, err := x.Request(req.Modelize(mod))
+	if err != nil {
+		logrus.Warnln("[aichat] focus post err:", err)
+		return
+	}
+	if focus.IsPass(data) {
+		logrus.Debugln("[aichat] focus model chose to pass in", gid)
+		return
+	}
+	txt := chat.Sanitize(strings.Trim(data, "\n 　"))
+	if len(txt) == 0 {
+		return
+	}
+	req.Done(txt)
+	chat.AddChatReply(gid, txt)
+	sendReply(ctx, stor, txt)
+}
+
+// sendReply 处理 {name}/{me}/{segment} 占位并发送, 可选以 AI 语音输出
+func sendReply(ctx *zero.Ctx, stor chat.Storage, txt string) {
+	nick := zero.BotConfig.NickName[rand.Intn(len(zero.BotConfig.NickName))]
+	txt = strings.ReplaceAll(txt, "{name}", ctx.CardOrNickName(ctx.Event.UserID))
+	txt = strings.ReplaceAll(txt, "{me}", nick)
+	id := any(nil)
+	if ctx.Event.IsToMe {
+		id = ctx.Event.MessageID
+	}
+	for _, t := range strings.Split(txt, "{segment}") {
+		if t == "" {
+			continue
+		}
+		logrus.Debugln("[aichat] 回复内容:", t)
+		recCfg := airecord.GetConfig()
+		record := ""
+		if !fastfailnorecord && !stor.NoRecord() {
+			record = ctx.GetAIRecord(recCfg.ModelID, recCfg.Customgid, t)
+			if record != "" {
+				ctx.SendChain(message.Record(record))
+				continue
+			}
+			fastfailnorecord = true
+		}
+		if id != nil {
+			id = ctx.SendChain(message.Reply(id), message.Text(t))
+		} else {
+			id = ctx.SendChain(message.Text(t))
+		}
+		process.SleepAbout1sTo2s()
+	}
 }

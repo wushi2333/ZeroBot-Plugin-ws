@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	
+
 	"github.com/sirupsen/logrus"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
@@ -14,6 +14,8 @@ import (
 	"github.com/FloatTech/zbputils/chat"
 	"github.com/FloatTech/zbputils/control"
 	"github.com/FloatTech/zbputils/ctxext"
+
+	"github.com/FloatTech/ZeroBot-Plugin/plugin/aichat/focus"
 )
 
 var (
@@ -26,6 +28,7 @@ var (
 			"- 设置AI聊天温度80\n" +
 			"- 设置AI聊天(|识图|Agent)接口类型[OpenAI|OLLaMA|GenAI]\n" +
 			"- 设置AI聊天(不)使用Agent模式\n" +
+			"- 设置AI聊天(不)使用专注模式 (默认使用, 只回应触发的那句话)\n" +
 			"- 设置AI聊天(不)支持系统提示词\n" +
 			"- 设置AI聊天(|识图|Agent)接口地址https://api.siliconflow.cn/v1/chat/completions\n" +
 			"- 设置AI聊天(|识图|Agent)密钥xxx\n" +
@@ -139,7 +142,7 @@ func init() {
 	en.OnPrefix("设置AI聊天Agent性格", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetStr(&chat.AC.AgentChar), func(_ *zero.Ctx) {
 			chat.AgentCharConfig.Chars = chat.AC.AgentChar
-			saveAgentCfg()     // 【新增】：保存到本地专属文件
+			saveAgentCfg() // 【新增】：保存到本地专属文件
 			chat.ResetAgents()
 		})
 	en.OnPrefix("设置AI聊天Agent性别", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
@@ -175,12 +178,12 @@ func init() {
 			return
 		}
 		chat.ResetAgentCharConfig()
-		
+
 		chat.AC.AgentChar = chat.AgentCharConfig.Chars
 		chat.AC.AgentSex = chat.AgentCharConfig.Sex
 		saveAgentCfg()
 		chat.ResetAgents()
-		
+
 		err := c.SetExtra(&chat.AC)
 		if err != nil {
 			ctx.SendChain(message.Text("ERROR: set extra err: ", err))
@@ -196,6 +199,8 @@ func init() {
 		Handle(chat.NewExtraSetBool(&chat.AC.NoSystemP))
 	en.OnRegex("^设置AI聊天(不)?使用Agent模式$", zero.SuperUserPermission).SetBlock(true).
 		Handle(ctxext.NewStorageSaveBoolHandler(chat.BitmapNagt))
+	en.OnRegex("^设置AI聊天(不)?使用专注模式$", zero.AdminPermission).SetBlock(true).
+		Handle(ctxext.NewStorageSaveBoolHandler(focus.BitmapNfcs))
 	en.OnPrefix("设置AI聊天最大长度", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
 		Handle(chat.NewExtraSetUint(&chat.AC.MaxN))
 	en.OnPrefix("设置AI聊天TopP", chat.EnsureConfig, zero.OnlyPrivate, zero.SuperUserPermission).SetBlock(true).
@@ -221,7 +226,8 @@ func init() {
 					"• 触发概率：", int(stor.Rate()), "\n",
 					"• 温度：", stor.Temp(), "\n",
 					"• 以AI语音输出：", chat.ModelBool(!stor.NoRecord()), "\n",
-					"• 使用Agent：", chat.ModelBool(!stor.NoAgent()), "\n",
+					"• 专注模式：", chat.ModelBool(focus.Uses(ctxext.Storage(stor))), "\n",
+					"• 使用Agent(专注模式关闭时)：", chat.ModelBool(!stor.NoAgent()), "\n",
 					"• 响应@：", chat.ModelBool(!stor.NoReplyAt()), "\n",
 				),
 				message.Text("【当前AI聊天全局配置】\n", &chat.AC),
@@ -233,6 +239,7 @@ func init() {
 	})
 	en.OnFullMatch("重置AI聊天", chat.EnsureConfig, zero.SuperUserPermission).SetBlock(true).Handle(func(ctx *zero.Ctx) {
 		chat.ResetChat()
+		focus.Reset()
 		ctx.SendChain(message.Text("成功"))
 	})
 }
