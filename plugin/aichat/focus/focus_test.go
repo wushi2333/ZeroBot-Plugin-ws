@@ -245,6 +245,73 @@ func TestRepliedByOthersAndIsCommand(t *testing.T) {
 	}
 }
 
+func TestParseActionsByIndex(t *testing.T) {
+	r := &Request{
+		mentions: []int64{2934812955, 1001}, mentionlabels: []string{"ghost(2934812955)", "RinDB(1001)"},
+		quoteuid: 3003, quotewho: "吃(3003)",
+	}
+	txt, acts := r.ParseActions("好嘞，安排上了<ban 1 min=30> 还有你<UNBAN 3>")
+	if txt != "好嘞，安排上了 还有你" {
+		t.Fatalf("tags must be stripped, got %q", txt)
+	}
+	if len(acts) != 2 || !acts[0].Ban || acts[0].QQ != 2934812955 || acts[0].Minutes != 30 || acts[1].Ban || acts[1].QQ != 3003 {
+		t.Fatalf("index must map to exact QQ, got %+v", acts)
+	}
+	if _, acts = r.ParseActions("<ban 2>"); acts[0].Minutes != DefaultBanMinutes {
+		t.Fatalf("default ban must be %d min", DefaultBanMinutes)
+	}
+	if _, acts = r.ParseActions("<ban 2 min=999999>"); acts[0].Minutes != MaxBanMinutes {
+		t.Fatalf("ban must be capped at %d min", MaxBanMinutes)
+	}
+	// 序号越界、旧格式 (抄QQ号) 都不执行, 但标记必须从文本里删掉
+	txt, acts = r.ParseActions("关起来<ban 9><ban qq=2934812951 min=1440>")
+	if len(acts) != 0 || txt != "关起来" {
+		t.Fatalf("invalid tags must be dropped and stripped, got %q %+v", txt, acts)
+	}
+	_, acts = r.ParseActions("<ban 1><ban 2><ban 3><ban 1>")
+	if len(acts) != 3 {
+		t.Fatalf("at most 3 actions per reply, got %d", len(acts))
+	}
+}
+
+func TestRenderTextAndCanTarget(t *testing.T) {
+	ctx := &zero.Ctx{Event: &zero.Event{SelfID: 3482259278, Message: message.Message{
+		message.At(3482259278),
+		message.Text(" 禁言 "),
+		{Type: "at", Data: map[string]string{"qq": "1001", "name": "@RinDB"}},
+		message.Text("十分钟"),
+	}}, State: zero.State{}}
+	txt, mentions, labels := renderText(ctx)
+	if txt != "禁言 @RinDB(1001) 十分钟" || len(labels) != 1 || labels[0] != "RinDB(1001)" {
+		t.Fatalf("unexpected rendered text %q labels %v", txt, labels)
+	}
+	r := &Request{mentions: mentions, quoteuid: 2002}
+	if !r.CanTarget(1001) || !r.CanTarget(2002) {
+		t.Fatal("mentioned user and quoted sender must be targetable")
+	}
+	if r.CanTarget(3003) || r.CanTarget(0) || r.CanTarget(3482259278) {
+		t.Fatal("anyone else must not be targetable")
+	}
+}
+
+func TestAddGroupRules(t *testing.T) {
+	r := &Request{mentions: []int64{2934812955}, mentionlabels: []string{"ghost(2934812955)"}}
+	r.AddGroupRules(true)
+	if !strings.Contains(r.persona, "<ban 序号") || !strings.Contains(r.persona, "1. ghost(2934812955)") {
+		t.Fatalf("admins must get numbered targets:\n%s", r.persona)
+	}
+	r = &Request{}
+	r.AddGroupRules(true)
+	if !strings.Contains(r.persona, "没有@任何人") {
+		t.Fatal("admin without targets must be told nothing can be done")
+	}
+	r = &Request{mentions: []int64{1001}, mentionlabels: []string{"RinDB(1001)"}}
+	r.AddGroupRules(false)
+	if strings.Contains(r.persona, "<ban") || !strings.Contains(r.persona, "不要假装已经禁言") {
+		t.Fatal("ordinary members must not get ban instructions")
+	}
+}
+
 func TestIsPass(t *testing.T) {
 	for _, s := range []string{"<pass>", " <PASS>\n", "嗯 <pass>"} {
 		if !IsPass(s) {

@@ -217,18 +217,31 @@ func selfname() string {
 	return "你"
 }
 
-// selfRules 写日记时的身份约定: 认得主人, 自称"我", 不把自己写成机器人
-func selfRules() string {
+func isOwner(uid int64) bool {
+	for _, o := range zero.BotConfig.SuperUsers {
+		if o == uid {
+			return true
+		}
+	}
+	return false
+}
+
+// selfRules 写日记时的身份约定: 认得主人, 自称"我", 不把自己写成机器人.
+// about 为日记写的是谁 (群聊总结为 0): 只有写的就是主人时才提主人, 免得陌生人的印象里也写一句"主人是xxx".
+func selfRules(about int64) string {
 	sb := strings.Builder{}
-	if len(zero.BotConfig.SuperUsers) > 0 {
-		sb.WriteString("QQ号为 ")
+	switch {
+	case about != 0 && isOwner(about):
+		sb.WriteString("TA就是你的主人，写印象时要体现这一点。")
+	case about == 0 && len(zero.BotConfig.SuperUsers) > 0:
+		sb.WriteString("群聊里QQ号为 ")
 		for i, o := range zero.BotConfig.SuperUsers {
 			if i > 0 {
 				sb.WriteString("、")
 			}
 			sb.WriteString(strconv.FormatInt(o, 10))
 		}
-		sb.WriteString(" 的人是你的主人，写到TA时要体现这一点。")
+		sb.WriteString(" 的人是你的主人。")
 	}
 	sb.WriteString("日记里提到你自己一律写\"我\"，不要写自己的名字；你是真人群友，绝不能把自己写成机器人、bot、AI或程序。\n")
 	return sb.String()
@@ -330,12 +343,12 @@ func writeConv(gid, uid int64, name string, turns []string) error {
 		old = "（还没有）"
 	}
 	prompt := "你是QQ群里的群友「" + selfname() + "」，正在写自己的私人日记，整理刚才和群友 " + who + " 的聊天。" + today(time.Now()) +
-		selfRules() +
+		selfRules(uid) +
 		"【你之前对TA的印象】\n" + old + "\n" +
 		"【你已经记得的相关的事】\n" + existingLines(es, uid, talk, 8) +
 		"【刚才的聊天】\n" + talk + "\n\n" +
 		`请输出JSON：{"profile":"更新后对TA的整体印象","memories":[{"content":"...","importance":1}]}` + "\n" +
-		"profile 写对TA的整体印象（性格、喜好、身份、和你的关系），把旧印象和新信息融合成一段话，不超过200字，要包含TA的名字；没有新信息就原样返回旧印象，旧印象为空且没什么可写就返回空字符串。\n" +
+		"profile 写对TA的整体印象（性格、喜好、身份、和你的关系），把旧印象和新信息融合成一段话，不超过200字，要包含TA的名字；没有新信息就原样返回旧印象。旧印象为空、而这次也只是寒暄一两句、没有关于TA的具体信息时，返回空字符串，不要硬写\"刚认识、还不了解\"之类的话。\n" +
 		diaryRules
 	resp, err := llm(prompt)
 	if err != nil {
@@ -349,7 +362,9 @@ func writeConv(gid, uid int64, name string, turns []string) error {
 	now := time.Now().Unix()
 	dbmu.Lock()
 	defer dbmu.Unlock()
-	if p := strings.TrimSpace(out.Profile); p != "" && p != oldp.Text {
+	// 第一次建印象要有实质内容: 至少聊了两轮, 或者这次抽到了值得记的事
+	substantial := oldp.Text != "" || len(turns) >= 4 || len(out.Memories) > 0
+	if p := strings.TrimSpace(out.Profile); p != "" && p != oldp.Text && substantial {
 		if err := setProfile(gid, uid, name, p, now); err != nil {
 			return err
 		}
@@ -384,7 +399,7 @@ func writeGroup(gid int64, lines []string) error {
 		return err
 	}
 	prompt := "你是QQ群里的群友「" + selfname() + "」，正在写日记，回顾群里最近的聊天，记下以后聊天可能用得上的群内信息。" + today(time.Now()) +
-		selfRules() +
+		selfRules(0) +
 		"群聊总结只记以后还用得上的：外号、梗、长期的喜好和身份、计划约定、重要事件；一次性的提问、求推荐、临时讨论和水群不记。\n" +
 		"【你已经记得的群里的事】\n" + existingLines(es, 0, talk, 12) +
 		"【最近的群聊】（括号里是QQ号）\n" + talk + "\n\n" +

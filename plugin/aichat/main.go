@@ -212,6 +212,9 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 	if req == nil {
 		return
 	}
+	if ctx.Event.GroupID != 0 && ctx.Event.IsToMe {
+		req.AddGroupRules(zero.AdminPermission(ctx))
+	}
 	usemem := memory.Enabled(ctxext.Storage(stor))
 	if usemem {
 		rc := memory.Get(gid, ctx.Event.UserID, req.Text())
@@ -223,6 +226,7 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 		maxn = focus.MaxTokens
 	}
 	txt := ""
+	var acts []focus.Action
 	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发
 	for try := 0; try < 2; try++ {
 		mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
@@ -239,22 +243,71 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 			logrus.Debugln("[aichat] focus model chose to pass in", gid)
 			return
 		}
-		txt = focus.Clamp(chat.Sanitize(strings.Trim(data, "\n 　")))
+		// 先取出动作标记再清洗, Sanitize 会按 "]" "】" 截断文本
+		clean, a := req.ParseActions(data)
+		txt = focus.Clamp(chat.Sanitize(strings.Trim(clean, "\n 　")))
 		if !focus.LeaksAI(txt) {
+			acts = a
 			break
 		}
 		logrus.Infoln("[aichat] focus reply leaks AI identity, try", try+1, ":", txt)
 		txt = ""
 	}
-	if len(txt) == 0 || focus.RepliedByOthers(ctx) {
+	if focus.RepliedByOthers(ctx) || (len(txt) == 0 && len(acts) == 0) {
 		return
 	}
-	req.Done(txt)
-	if usemem {
-		memory.Observe(gid, ctx.Event.UserID, ctx.Event.Sender.Name(), req.Text(), txt)
+	if len(txt) > 0 {
+		req.Done(txt)
+		if usemem {
+			memory.Observe(gid, ctx.Event.UserID, ctx.Event.Sender.Name(), req.Text(), txt)
+		}
+		chat.AddChatReply(gid, txt)
+		sendReply(ctx, stor, txt)
 	}
-	chat.AddChatReply(gid, txt)
-	sendReply(ctx, stor, txt)
+	runActions(ctx, req, acts)
+}
+
+func isSuperUser(qq int64) bool {
+	for _, su := range zero.BotConfig.SuperUsers {
+		if su == qq {
+			return true
+		}
+	}
+	return false
+}
+
+// runActions 执行模型给出的群管理动作. 与旧 Agent 的权限一致: 只有群管理/群主/主人@bot 时才能让它禁言别人,
+// 且目标只能是当前消息 @ 到的人或被引用消息的发送者, 主人、bot 自己和群管理不能被禁言.
+func runActions(ctx *zero.Ctx, req *focus.Request, acts []focus.Action) {
+	if len(acts) == 0 {
+		return
+	}
+	gid := ctx.Event.GroupID
+	if gid == 0 || !ctx.Event.IsToMe || !zero.AdminPermission(ctx) {
+		logrus.Infoln("[aichat] focus drop actions from non-admin", ctx.Event.UserID, "in", gid, ":", acts)
+		return
+	}
+	for _, a := range acts {
+		if !req.CanTarget(a.QQ) || a.QQ == ctx.Event.SelfID || isSuperUser(a.QQ) {
+			logrus.Infoln("[aichat] focus refuse action on", a.QQ, "in", gid, "requested by", ctx.Event.UserID)
+			continue
+		}
+		var secs int64
+		if a.Ban {
+			if role := ctx.GetGroupMemberInfo(gid, a.QQ, true).Get("role").String(); role != "member" {
+				logrus.Infoln("[aichat] focus refuse to ban", a.QQ, "role", role, "in", gid)
+				continue
+			}
+			secs = a.Minutes * 60
+		}
+		rsp := ctx.CallAction("set_group_ban", zero.Params{"group_id": gid, "user_id": a.QQ, "duration": secs})
+		if rsp.Status != "ok" {
+			logrus.Warnln("[aichat] focus set_group_ban", a.QQ, secs, "failed:", rsp.RetCode, rsp.Message, rsp.Wording)
+			ctx.SendChain(message.Text("诶…没弄成，可能我在这个群没有管理权限"))
+			continue
+		}
+		logrus.Infoln("[aichat] focus set_group_ban", a.QQ, "for", secs, "s in", gid, "requested by", ctx.Event.UserID)
+	}
 }
 
 // sendReply 处理 {name}/{me}/{segment} 占位并发送, 可选以 AI 语音输出

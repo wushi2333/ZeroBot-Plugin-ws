@@ -45,6 +45,8 @@ const (
 	entryLen       = 60   // 日记条目最长字符数
 	profileLen     = 200  // 印象最长字符数
 	groupCap       = 200  // 每群最多保留条目
+	profileCap     = 300  // 每群最多保留印象
+	profileTTL     = 60   // 印象多少天没更新就忘掉
 )
 
 // Enabled 本群是否使用记忆 (默认使用, 仅在专注模式下生效)
@@ -364,8 +366,32 @@ func setProfile(gid, uid int64, name, text string, now int64) error {
 	return db.Insert(tableProfile, &Profile{Key: profilekey(gid, uid), GID: gid, UID: uid, Name: name, Text: text, Updated: now})
 }
 
-// prune 遗忘超出上限的条目. 必须持有 dbmu
+// pruneProfiles 忘掉很久没更新的印象, 并限制每群数量 (大群里聊过一次的人很多). 必须持有 dbmu
+func pruneProfiles(gid int64, now int64) error {
+	if err := db.Del(tableProfile, "WHERE gid = ? AND updated < ?", gid, now-profileTTL*86400); err != nil {
+		return err
+	}
+	ps, err := sql.FindAll[Profile](&db, tableProfile, "WHERE gid = ?", gid)
+	if errors.Is(err, sql.ErrNullResult) || len(ps) <= profileCap {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sort.Slice(ps, func(i, j int) bool { return ps[i].Updated > ps[j].Updated })
+	for _, p := range ps[profileCap:] {
+		if err := db.Del(tableProfile, "WHERE pkey = ?", p.Key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// prune 遗忘超出上限的条目与过期印象. 必须持有 dbmu
 func prune(gid int64, now int64) error {
+	if err := pruneProfiles(gid, now); err != nil {
+		return err
+	}
 	es, err := entriesOf(gid)
 	if err != nil || len(es) <= groupCap {
 		return err

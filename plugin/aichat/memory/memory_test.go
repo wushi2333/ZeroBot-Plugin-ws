@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	sql "github.com/FloatTech/sqlite"
 	zero "github.com/wdvxdr1123/ZeroBot"
 
 	"github.com/FloatTech/zbputils/chat"
@@ -99,16 +100,77 @@ func TestDiaryPromptKnowsOwnerAndSelf(t *testing.T) {
 	old := zero.BotConfig.SuperUsers
 	zero.BotConfig.SuperUsers = []int64{837145630}
 	defer func() { zero.BotConfig.SuperUsers = old }()
-	prompts := fakeLLM(t, `{"profile":"吃(1366348913)喜欢调戏机器人","memories":[]}`)
+	prompts := fakeLLM(t, `{"profile":"吃(1366348913)喜欢调戏机器人","memories":[{"content":"吃(1366348913)喜欢长离","importance":1}]}`)
 	if err := writeConv(4, 1366348913, "吃", []string{"TA：a", "你：b"}); err != nil {
 		t.Fatal(err)
 	}
 	p := (*prompts)[0]
-	if !strings.Contains(p, "QQ号为 837145630 的人是你的主人") || !strings.Contains(p, "绝不能把自己写成机器人") {
-		t.Fatalf("diary prompt lacks owner/self rules:\n%s", p)
+	if !strings.Contains(p, "绝不能把自己写成机器人") {
+		t.Fatalf("diary prompt lacks self rules:\n%s", p)
 	}
-	if profile, _ := About(4, 1366348913, 1); strings.Contains(profile, "机器人") {
-		t.Fatalf("stored profile still calls me a robot: %q", profile)
+	if strings.Contains(p, "837145630") || strings.Contains(p, "TA就是你的主人") {
+		t.Fatal("a stranger's diary must not mention the owner")
+	}
+	if profile, _ := About(4, 1366348913, 1); profile == "" || strings.Contains(profile, "机器人") {
+		t.Fatalf("stored profile missing or still calls me a robot: %q", profile)
+	}
+	// 写主人自己的日记时才提主人
+	prompts = fakeLLM(t, `{"profile":"","memories":[]}`)
+	_ = writeConv(4, 837145630, "巫逝", []string{"TA：a", "你：b"})
+	if !strings.Contains((*prompts)[0], "TA就是你的主人") {
+		t.Fatal("owner's diary must say TA is the owner")
+	}
+	// 群聊总结列出主人 QQ
+	prompts = fakeLLM(t, `{"memories":[]}`)
+	_ = writeGroup(4, []string{"巫逝(837145630)：hi"})
+	if !strings.Contains((*prompts)[0], "QQ号为 837145630 的人是你的主人") {
+		t.Fatal("group diary must know the owner")
+	}
+}
+
+func TestNoProfileForSmallTalk(t *testing.T) {
+	usedb(t)
+	fakeLLM(t, `{"profile":"路人(2002)是刚认识的群友，暂时还不了解","memories":[]}`)
+	if err := writeConv(6, 2002, "路人", []string{"TA：你好", "你：你好呀"}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := About(6, 2002, 1); p != "" {
+		t.Fatalf("one line of small talk must not create a profile: %q", p)
+	}
+	// 聊了两轮就建
+	if err := writeConv(6, 2002, "路人", []string{"TA：你好", "你：你好呀", "TA：喜欢鸣潮吗", "你：喜欢！"}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := About(6, 2002, 1); p == "" {
+		t.Fatal("two rounds of chat should create a profile")
+	}
+}
+
+func TestPruneProfiles(t *testing.T) {
+	usedb(t)
+	now := time.Now().Unix()
+	dbmu.Lock()
+	defer dbmu.Unlock()
+	if err := opendb(); err != nil {
+		t.Fatal(err)
+	}
+	// 一个过期的 + profileCap+5 个新的
+	_ = setProfile(8, 1, "old", "很久以前认识的人", now-(profileTTL+1)*86400)
+	for i := 0; i < profileCap+5; i++ {
+		_ = setProfile(8, int64(100+i), "p", "印象"+strconv.Itoa(i), now-int64(i))
+	}
+	if err := pruneProfiles(8, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := profileOf(8, 1); ok {
+		t.Fatal("profile idle beyond TTL must be forgotten")
+	}
+	ps, _ := sql.FindAll[Profile](&db, tableProfile, "WHERE gid = ?", 8)
+	if len(ps) != profileCap {
+		t.Fatalf("want %d profiles after cap, got %d", profileCap, len(ps))
+	}
+	if _, ok := profileOf(8, 100); !ok {
+		t.Fatal("most recently updated profiles must be kept")
 	}
 }
 
@@ -261,6 +323,7 @@ func TestRunOnceWritesIdleConversations(t *testing.T) {
 	t.Cleanup(func() { chat.AC.Key = "" })
 	prompts := fakeLLM(t, `{"profile":"Dekadenz(1002)：喜欢可爱的东西","memories":[]}`)
 	Observe(5, 1002, "Dekadenz", "这个好可爱", "是吧是吧")
+	Observe(5, 1002, "Dekadenz", "你也喜欢吗", "喜欢呀")
 	runOnce(time.Now())
 	if len(*prompts) != 0 {
 		t.Fatal("conversation must not be written before it goes idle")
