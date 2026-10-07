@@ -2,6 +2,7 @@
 package llm
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -234,7 +235,7 @@ func llmchat(prompt string, temp float32) (string, error) {
 
 	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temp, topp, maxn, chat.AC.ReasoningEffort)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
 
 	data, err := x.Request(mod.User(model.NewContentText(prompt)))
@@ -242,5 +243,9 @@ func llmchat(prompt string, temp float32) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(data), nil
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return "", errors.New("大模型返回内容为空")
+	}
+	return data, nil
 }
