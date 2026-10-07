@@ -1,0 +1,2 @@
+# go test 时 zbputils 会把资源文件下载到当前目录
+data/
