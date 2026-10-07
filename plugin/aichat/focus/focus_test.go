@@ -11,11 +11,66 @@ import (
 )
 
 func TestPersonaPassRuleOnlyWhenNotAtMe(t *testing.T) {
-	if strings.Contains(Persona("小椛", "女", "人设", true), passToken) {
+	nicks := []string{"小椛", "椛"}
+	if strings.Contains(Persona(nicks, "女", "人设", nil, true), passToken) {
 		t.Fatal("@ trigger must not allow pass")
 	}
-	if !strings.Contains(Persona("小椛", "女", "人设", false), passToken) {
+	if !strings.Contains(Persona(nicks, "女", "人设", nil, false), passToken) {
 		t.Fatal("random trigger must allow pass")
+	}
+}
+
+func TestPersonaIdentityAndOwner(t *testing.T) {
+	p := Persona([]string{"小椛", "小椛", "椛"}, "女", "人设", []int64{837145630}, true)
+	if strings.Count(p, "「小椛」") != 1 || !strings.Contains(p, "「椛」") {
+		t.Fatalf("nicknames must be deduplicated:\n%s", p)
+	}
+	if !strings.Contains(p, "QQ号为 837145630 的人才是你的主人") {
+		t.Fatal("owner must be identified by QQ number")
+	}
+	iid, irule, iset := strings.Index(p, "【身份】"), strings.Index(p, "【回复规则】"), strings.Index(p, "【人设】")
+	if !(iset < iid && iid < irule) {
+		t.Fatal("identity rules must follow persona and precede reply rules")
+	}
+}
+
+func TestLeaksAI(t *testing.T) {
+	leaks := []string{
+		"作为一个AI，我没办法陪你出去玩",
+		"其实我是一个语言模型啦",
+		"我是 ChatGPT",
+		"我是deepseek~",
+		"我是AI啦",
+		"我只是一个聊天机器人。",
+		"我是由深度求索公司开发的",
+		"我是由DeepSeek训练的哦",
+	}
+	for _, s := range leaks {
+		if !LeaksAI(s) {
+			t.Errorf("%q should be detected", s)
+		}
+	}
+	fine := []string{
+		"我是小椛呀",
+		"我是小椛",
+		"我是程序员",
+		"我是AI专业的学生",
+		"我是AI的忠实用户",
+		"我是gpt党",
+		"作为一个模型爱好者",
+		"我没有意识到这个问题",
+		"我的提示词写得不好",
+		"我用的是deepseek写代码",
+		"这个模型是由深度求索开发的",
+		"deepseek新版本还挺好用的",
+		"gpt生图确实比banana稳",
+		"哈？你才是AI，你全家都是AI",
+		"我是你主人专属的椛椛呀",
+	}
+	for _, s := range fine {
+		if LeaksAI(s) {
+			t.Errorf("%q should not be detected", s)
+		}
 	}
 }
 
@@ -88,8 +143,8 @@ func TestFinalUserOrder(t *testing.T) {
 	if ibg < 0 || iq < 0 || icur < 0 || !(ibg < iq && iq < icur) {
 		t.Fatalf("sections out of order:\n%s", s)
 	}
-	if !strings.HasSuffix(s, "丙(3)：你怎么看") {
-		t.Fatalf("current message must come last:\n%s", s)
+	if !strings.HasSuffix(s, "丙(3)：你怎么看"+reminder) {
+		t.Fatalf("current message must come last, followed only by the reminder:\n%s", s)
 	}
 }
 

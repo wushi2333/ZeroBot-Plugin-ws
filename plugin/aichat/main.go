@@ -201,27 +201,36 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 	if sex == "" {
 		sex = chat.AgentCharConfig.Sex
 	}
-	persona := focus.Persona(zero.BotConfig.NickName[0], sex, char, ctx.Event.IsToMe)
+	persona := focus.Persona(zero.BotConfig.NickName, sex, char, zero.BotConfig.SuperUsers, ctx.Event.IsToMe)
 	req := focus.NewRequest(ctx, persona, bool(chat.AC.NoSystemP))
 	if req == nil {
 		return
 	}
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
-	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
-	if err != nil {
-		logrus.Warnln("ERROR: ", err)
-		return
+	txt := ""
+	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发
+	for try := 0; try < 2; try++ {
+		mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
+		if err != nil {
+			logrus.Warnln("ERROR: ", err)
+			return
+		}
+		data, err := x.Request(req.Modelize(mod))
+		if err != nil {
+			logrus.Warnln("[aichat] focus post err:", err)
+			return
+		}
+		if focus.IsPass(data) {
+			logrus.Debugln("[aichat] focus model chose to pass in", gid)
+			return
+		}
+		txt = chat.Sanitize(strings.Trim(data, "\n 　"))
+		if !focus.LeaksAI(txt) {
+			break
+		}
+		logrus.Infoln("[aichat] focus reply leaks AI identity, try", try+1, ":", txt)
+		txt = ""
 	}
-	data, err := x.Request(req.Modelize(mod))
-	if err != nil {
-		logrus.Warnln("[aichat] focus post err:", err)
-		return
-	}
-	if focus.IsPass(data) {
-		logrus.Debugln("[aichat] focus model chose to pass in", gid)
-		return
-	}
-	txt := chat.Sanitize(strings.Trim(data, "\n 　"))
 	if len(txt) == 0 {
 		return
 	}
