@@ -12,9 +12,13 @@ import (
 	"github.com/FloatTech/floatbox/binary"
 	fcext "github.com/FloatTech/floatbox/ctxext"
 	ctrl "github.com/FloatTech/zbpctrl"
+	"github.com/FloatTech/zbputils/chat"
 	"github.com/FloatTech/zbputils/control"
 	"github.com/FloatTech/zbputils/ctxext"
 	"github.com/FloatTech/zbputils/img/text"
+	"github.com/fumiama/deepinfra"
+	"github.com/fumiama/deepinfra/model"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	zero "github.com/wdvxdr1123/ZeroBot"
 	"github.com/wdvxdr1123/ZeroBot/message"
@@ -35,6 +39,16 @@ type formation struct {
 	IsCut     bool       `json:"is_cut"`
 	Represent [][]string `json:"represent"`
 }
+
+type drawResult struct {
+	Name        string
+	Position    string
+	Description string
+	Represent   string
+}
+
+type drawResults []drawResult
+
 type cardSet = map[string]card
 
 var (
@@ -52,10 +66,10 @@ func init() {
 	engine := control.AutoRegister(&ctrl.Options[*zero.Ctx]{
 		DisableOnDefault: false,
 		Brief:            "塔罗牌",
-		Help: "- 抽[塔罗牌|大阿卡纳|小阿卡纳]\n" +
+		Help: "- 抽[塔罗牌|大阿卡纳|小阿卡纳] [询问的事情]\n" +
 			"- 抽n张[塔罗牌|大阿卡纳|小阿卡纳]\n" +
 			"- 解塔罗牌[牌名]\n" +
-			"- [塔罗|大阿卡纳|小阿卡纳|混合]牌阵[圣三角|时间之流|四要素|五牌阵|吉普赛十字|马蹄|六芒星]",
+			"- [塔罗|大阿卡纳|小阿卡纳|混合]牌阵[圣三角|时间之流|四要素|五牌阵|吉普赛十字|马蹄|六芒星] [询问的事情]",
 		PublicDataFolder: "Tarot",
 	}).ApplySingle(ctxext.DefaultSingle)
 
@@ -112,9 +126,11 @@ func init() {
 		logrus.Infof("[tarot]读取%d组塔罗牌阵", len(formationMap))
 		return true
 	})
-	engine.OnRegex(`^抽(\d{1,2}张)?((塔罗牌|大阿(尔)?卡纳)|小阿(尔)?卡纳)$`, getTarot).SetBlock(true).Limit(ctxext.LimitByGroup).Handle(func(ctx *zero.Ctx) {
+	engine.OnRegex(`^抽(\d{1,2}张)?((塔罗牌|大阿(尔)?卡纳)|小阿(尔)?卡纳)\s?(.*)$`, getTarot).SetBlock(true).Limit(ctxext.LimitByGroup).Handle(func(ctx *zero.Ctx) {
 		match := ctx.State["regex_matched"].([]string)[1]
 		cardType := ctx.State["regex_matched"].([]string)[2]
+		question := strings.TrimSpace(ctx.State["regex_matched"].([]string)[6])
+		withQuestion := match == "" && question != ""
 		n := 1
 		reasons := [...]string{"您抽到的是~\n", "锵锵锵，塔罗牌的预言是~\n", "诶，让我看看您抽到了~\n"}
 		position := [...]string{"『正位』", "『逆位』"}
@@ -154,11 +170,47 @@ func init() {
 			if err != nil {
 				// ctx.SendChain(message.Text("ERROR: ", err))
 				logrus.Infof("[tarot]获取图片失败: %v", err)
-				ctx.SendChain(message.Text(reasons[rand.Intn(len(reasons))], position[p], "的『", name, "』\n其释义为: ", description))
+			} else {
+				ctx.SendChain(message.ImageBytes(data))
+			}
+			ctx.SendChain(message.Text(reasons[rand.Intn(len(reasons))], position[p], "的『", name, "』\n其释义为: ", description))
+			if !withQuestion {
 				return
 			}
-			ctx.SendChain(message.ImageBytes(data))
-			ctx.SendChain(message.Text(reasons[rand.Intn(len(reasons))], position[p], "的『", name, "』\n其释义为: ", description))
+			if !chat.EnsureConfig(ctx) {
+				ctx.SendChain(message.Text("塔罗解析失败: 无法读取 AI 聊天配置"))
+				return
+			}
+			gid := ctx.Event.GroupID
+			if gid == 0 {
+				gid = -ctx.Event.UserID
+			}
+			stor, err := chat.NewStorage(ctx, gid)
+			if err != nil {
+				ctx.SendChain(message.Text("塔罗解析失败: ", errors.Wrap(err, "读取 AI 聊天温度配置失败")))
+				return
+			}
+			reply, err := drawResults{{
+				Name:        name,
+				Position:    position[p],
+				Description: description,
+			}}.analyze(question, "", stor.Temp())
+			if err != nil {
+				logrus.Warnln("[tarot]大模型解析失败:", err)
+				ctx.SendChain(message.Text("塔罗解析失败: ", err))
+				return
+			}
+			if reply == "" {
+				ctx.SendChain(message.Text("塔罗解析失败: 大模型返回为空"))
+				return
+			}
+			if id := ctx.Send(makeNodeMessage(
+				reply,
+				ctx.CardOrNickName(ctx.Event.UserID),
+				ctx.Event.UserID,
+			)).ID(); id == 0 {
+				ctx.SendChain(message.Text("ERROR: 可能被风控了"))
+			}
 			return
 		}
 		msg := make(message.Message, n)
@@ -238,8 +290,16 @@ func init() {
 	})
 	engine.OnRegex(`^((塔罗|大阿(尔)?卡纳)|小阿(尔)?卡纳|混合)牌阵\s?(.*)`, getTarot).SetBlock(true).Limit(ctxext.LimitByGroup).Handle(func(ctx *zero.Ctx) {
 		cardType := ctx.State["regex_matched"].([]string)[1]
-		match := ctx.State["regex_matched"].([]string)[5]
-		info, ok := formationMap[match]
+		rawMatch := strings.TrimSpace(ctx.State["regex_matched"].([]string)[5])
+		var match string
+		for name := range formationMap {
+			if strings.HasPrefix(rawMatch, name) && len(name) > len(match) {
+				match = name
+			}
+		}
+		question := strings.TrimSpace(strings.TrimPrefix(rawMatch, match))
+		_, ok := formationMap[match]
+		info := formationMap[match]
 		position := [...]string{"『正位』", "『逆位』"}
 		reverse := [...]string{"", "Reverse/"}
 		start, length := 0, 22
@@ -258,6 +318,7 @@ func init() {
 			build.WriteString(match)
 			build.WriteString("\n")
 			msg := make(message.Message, info.CardsNum+1)
+			results := make(drawResults, 0, info.CardsNum)
 			randomIntMap := make(map[int]int, 30)
 			for i := 0; i < info.CardsNum; i++ {
 				j := rand.Intn(length)
@@ -295,6 +356,12 @@ func init() {
 				build.WriteString("』\n其释义为: \n")
 				build.WriteString(description)
 				build.WriteString("\n")
+				results = append(results, drawResult{
+					Name:        name,
+					Position:    position[p],
+					Description: description,
+					Represent:   info.Represent[0][i],
+				})
 				msg[i] = ctxext.FakeSenderForwardNode(ctx, tarotmsg...)
 			}
 			txt := build.String()
@@ -307,8 +374,110 @@ func init() {
 			if id := ctx.Send(msg).ID(); id == 0 {
 				ctx.SendChain(message.Text("ERROR: 可能被风控了"))
 			}
+			if question == "" {
+				return
+			}
+
+			if !chat.EnsureConfig(ctx) {
+				ctx.SendChain(message.Text("塔罗解析失败: 无法读取 AI 聊天配置"))
+				return
+			}
+			gid := ctx.Event.GroupID
+			if gid == 0 {
+				gid = -ctx.Event.UserID
+			}
+			stor, err := chat.NewStorage(ctx, gid)
+			if err != nil {
+				ctx.SendChain(message.Text("塔罗解析失败: ", errors.Wrap(err, "读取 AI 聊天温度配置失败")))
+				return
+			}
+			reply, err := results.analyze(question, match, stor.Temp())
+			if err != nil {
+				logrus.Warnln("[tarot]大模型解析失败:", err)
+				ctx.SendChain(message.Text("塔罗解析失败: ", err))
+				return
+			}
+			if reply == "" {
+				ctx.SendChain(message.Text("塔罗解析失败: 大模型返回为空"))
+				return
+			}
+			if id := ctx.Send(makeNodeMessage(
+				reply,
+				ctx.CardOrNickName(ctx.Event.UserID),
+				ctx.Event.UserID,
+			)).ID(); id == 0 {
+				ctx.SendChain(message.Text("ERROR: 可能被风控了"))
+			}
 		} else {
-			ctx.SendChain(message.Text("没有找到", match, "噢~\n现有牌阵列表: \n", strings.Join(formationName, "\n")))
+			ctx.SendChain(message.Text("没有找到", rawMatch, "噢~\n现有牌阵列表: \n", strings.Join(formationName, "\n")))
 		}
 	})
+}
+
+func (draws drawResults) analyze(question, formationName string, temperature float32) (string, error) {
+	var build strings.Builder
+	build.WriteString("你是一位谨慎的塔罗牌解读者。请围绕用户的问题和本次牌面解读，先说明牌面，再给出综合建议，字数控制在300-500字。")
+	build.WriteString("不要把占卜结果表述为确定事实。\n")
+	build.WriteString("用户问题: ")
+	build.WriteString(question)
+	build.WriteByte('\n')
+	if formationName != "" {
+		build.WriteString("牌阵: ")
+		build.WriteString(formationName)
+		build.WriteByte('\n')
+	}
+	build.WriteString("牌面:\n")
+	for i, draw := range draws {
+		build.WriteString(strconv.Itoa(i + 1))
+		build.WriteString(". ")
+		if draw.Represent != "" {
+			build.WriteString("牌位: ")
+			build.WriteString(draw.Represent)
+			build.WriteString("; ")
+		}
+		build.WriteString("牌: ")
+		build.WriteString(draw.Name)
+		build.WriteString("; 方位: ")
+		build.WriteString(draw.Position)
+		build.WriteString("; 固定释义: ")
+		build.WriteString(draw.Description)
+		build.WriteByte('\n')
+	}
+	topp, maxn := chat.AC.MParams()
+	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, chat.AC.ReasoningEffort)
+	if err != nil {
+		return "", errors.Wrap(err, "创建 AI 模型协议失败")
+	}
+
+	api := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	data, err := api.Request(mod.User(model.NewContentText(build.String())))
+	if err != nil {
+		return "", errors.Wrap(err, "请求 AI 模型失败")
+	}
+	return strings.TrimSpace(data), nil
+}
+
+func makeNodeMessage(reply, nickname string, userID int64) message.Message {
+	chunks := splitTextChunks("塔罗解析:\n"+reply, 1000)
+	msg := make(message.Message, 0, len(chunks))
+	for _, chunk := range chunks {
+		msg = append(msg, message.CustomNode(nickname, userID, message.Message{message.Text(chunk)}))
+	}
+	return msg
+}
+
+func splitTextChunks(txt string, maxRunes int) []string {
+	runes := []rune(txt)
+	if maxRunes <= 0 || len(runes) <= maxRunes {
+		return []string{txt}
+	}
+	chunks := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
+	for len(runes) > maxRunes {
+		chunks = append(chunks, string(runes[:maxRunes]))
+		runes = runes[maxRunes:]
+	}
+	if len(runes) > 0 {
+		chunks = append(chunks, string(runes))
+	}
+	return chunks
 }
