@@ -12,6 +12,7 @@ package shortctx
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -454,8 +455,13 @@ func worker() {
 	}
 }
 
+// llmClient 做摘要的请求. 默认的 http.DefaultClient 没有超时,
+// 2026-10-15 DeepSeek 故障时摘要 worker 因此卡了 3 个多小时
+var llmClient = &http.Client{Timeout: 90 * time.Second}
+
 func callAC(prompt string) (string, error) {
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	x.SetHTTPClient(llmClient)
 	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, 0.3, 0.9, 512, chat.AC.ReasoningEffort)
 	if err != nil {
 		return "", err

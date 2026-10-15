@@ -4,10 +4,12 @@ package tarot
 import (
 	"encoding/json"
 	"math/rand"
+	"net/http"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/FloatTech/floatbox/binary"
 	fcext "github.com/FloatTech/floatbox/ctxext"
@@ -450,12 +452,17 @@ func (draws drawResults) analyze(question, formationName string, temperature flo
 	}
 
 	api := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	api.SetHTTPClient(llmClient)
 	data, err := api.Request(mod.User(model.NewContentText(build.String())))
 	if err != nil {
 		return "", errors.Wrap(err, "请求 AI 模型失败")
 	}
 	return strings.TrimSpace(data), nil
 }
+
+// llmClient 默认的 http.DefaultClient 没有超时: 接口卡住超过 ZeroBot 的 4 分钟处理时限后,
+// PostHandler 被跳过, 该用户的反并发锁不再释放, 之后一直提示"您有操作正在执行"
+var llmClient = &http.Client{Timeout: 150 * time.Second}
 
 func makeNodeMessage(reply, nickname string, userID int64) message.Message {
 	chunks := splitTextChunks("塔罗解析:\n"+reply, 1000)

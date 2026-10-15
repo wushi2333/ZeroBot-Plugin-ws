@@ -3,6 +3,7 @@ package llm
 
 import (
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -227,11 +228,16 @@ func init() {
 	})
 }
 
+// llmClient 默认的 http.DefaultClient 没有超时: 接口卡住超过 ZeroBot 的 4 分钟处理时限后,
+// PostHandler 被跳过, 反并发锁不再释放, 本群之后的总结/gpt 都会被静默丢弃
+var llmClient = &http.Client{Timeout: 150 * time.Second}
+
 // llmchat 调用大模型API包装
 func llmchat(prompt string, temp float32) (string, error) {
 	topp, maxn := chat.AC.MParams()
 
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	x.SetHTTPClient(llmClient)
 
 	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temp, topp, maxn, chat.AC.ReasoningEffort)
 	if err != nil {

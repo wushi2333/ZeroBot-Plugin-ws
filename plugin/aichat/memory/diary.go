@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -201,8 +202,12 @@ func pruneAll(now int64) {
 
 // ---------- 调用大模型 ----------
 
+// llmClient 写日记的请求. 默认的 http.DefaultClient 没有超时, 接口故障时会把日记 worker 卡住
+var llmClient = &http.Client{Timeout: 90 * time.Second}
+
 func callAC(prompt string) (string, error) {
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+	x.SetHTTPClient(llmClient)
 	mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, 0.3, 0.9, 1024, chat.AC.ReasoningEffort)
 	if err != nil {
 		return "", err

@@ -3,6 +3,7 @@ package aichat
 
 import (
 	"encoding/json"
+	"errors"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -56,6 +57,10 @@ var (
 
 var (
 	fastfailnorecord = false
+
+	// llmClient 非专注模式的大模型请求. deepinfra 默认用没有超时的 http.DefaultClient,
+	// 接口卡住时处理器会一直挂着, 本群的反并发锁也跟着卡死
+	llmClient = &http.Client{Timeout: 90 * time.Second}
 )
 
 func init() {
@@ -124,6 +129,7 @@ func init() {
 			}
 			// ===============================================================================
 			x := deepinfra.NewAPI(chat.AC.AgentAPI, string(chat.AC.AgentKey))
+			x.SetHTTPClient(llmClient)
 			mod, err := chat.AC.Type.Protocol(chat.AC.AgentModelName, temperature, topp, maxn, effort)
 			if err != nil {
 				logrus.Warnln("ERROR: ", err)
@@ -148,7 +154,9 @@ func init() {
 					logrus.Warnln("ERROR: ", err)
 					return
 				}
-				ag.SetViewImageAPI(deepinfra.NewAPI(chat.AC.ImageAPI, string(chat.AC.ImageKey)), mod)
+				ix := deepinfra.NewAPI(chat.AC.ImageAPI, string(chat.AC.ImageKey))
+				ix.SetHTTPClient(llmClient)
+				ag.SetViewImageAPI(ix, mod)
 				logrus.Debugln("[aichat] agent set img")
 			}
 			ctx.NoTimeout()
@@ -187,6 +195,7 @@ func init() {
 		}
 
 		x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
+		x.SetHTTPClient(llmClient) // 单次请求, 限时远小于 ZeroBot 的 4 分钟处理时限
 		mod, err := chat.AC.Type.Protocol(chat.AC.ModelName, temperature, topp, maxn, effort)
 		if err != nil {
 			logrus.Warnln("ERROR: ", err)
@@ -206,8 +215,19 @@ func init() {
 	})
 }
 
+// focusBudget 专注模式一次回复的总时限 (含取引用、下载图片、重试和搜索后的再答).
+// 必须明显小于 ZeroBot 的 MaxProcessTime (4 分钟): 超时后 ZeroBot 会放弃等待并跳过 PostHandler,
+// 本群的反并发锁 (ApplySingle) 就再也不会释放, 之后本群发给 AI 的消息全被静默丢弃.
+// 2026-10-15 DeepSeek 故障时, 一条带图消息 120s 超时 + 去图重试 120s 正好 4 分钟, dsh 群因此失效.
+const focusBudget = 150 * time.Second
+
+var errFocusBudget = errors.New("专注模式回复超出总时限")
+
 // focusChat 专注模式: 只回应当前这句话, 群聊背景仅作低权重参考
 func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp float32, effort string) {
+	// 一定等处理结束再退出, 让 PostHandler 释放反并发锁; 总耗时由 focusBudget 保证有限
+	ctx.NoTimeout()
+	deadline := time.Now().Add(focusBudget)
 	char := chat.AC.AgentChar
 	if char == "" {
 		char = chat.AgentCharConfig.Chars
@@ -237,12 +257,22 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 	}
 	req.LoadImages()
 	x := deepinfra.NewAPI(chat.AC.API, string(chat.AC.Key))
-	// 默认的 http.DefaultClient 没有超时, 接口卡住会让本群一直不回话
-	timeout := 60 * time.Second
+	// 每次请求的超时不超过 perreq, 所有请求 (含重试、搜索后的再答) 加起来不超过 deadline
+	perreq := 60 * time.Second
 	if effort != "none" {
-		timeout = 120 * time.Second
+		perreq = 90 * time.Second
 	}
-	x.SetHTTPClient(&http.Client{Timeout: timeout})
+	request := func(m deepinfra.Model) (string, error) {
+		left := time.Until(deadline)
+		if left < 5*time.Second {
+			return "", errFocusBudget
+		}
+		if left > perreq {
+			left = perreq
+		}
+		x.SetHTTPClient(&http.Client{Timeout: left})
+		return x.Request(m)
+	}
 	ask := func() (string, error) {
 		eff := effort
 		for {
@@ -250,8 +280,8 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 			if err != nil {
 				return "", err
 			}
-			data, err := x.Request(req.Modelize(mod))
-			if err != nil && req.HasImages() {
+			data, err := request(req.Modelize(mod))
+			if err != nil && req.HasImages() && !errors.Is(err, errFocusBudget) {
 				// 模型不支持识图时去掉图片, 按文字再试一次
 				logrus.Warnln("[aichat] focus post with images err:", err, ", retry without images")
 				req.DropImages()
