@@ -42,10 +42,18 @@ func TestBlocklist(t *testing.T) {
 	if b.has("啊~") || !b.has("草") {
 		t.Fatal("edits must take effect without restart")
 	}
+	// 对象格式: 整句 + 屏蔽词
+	write(`{"replies": ["草"], "words": ["爸爸", "爹", " "]}`, t0.Add(3*time.Minute))
+	if !b.has("草") || !b.has("你又不是咱的爸爸……") || !b.has("叫爹！") {
+		t.Fatal("object format must block exact replies and any reply containing a word")
+	}
+	if b.has("爸妈都在家") || b.has("好的哦~") {
+		t.Fatal("unrelated replies must pass; blank words are ignored")
+	}
 	if err := os.Remove(p); err != nil {
 		t.Fatal(err)
 	}
-	if b.has("草") {
+	if b.has("草") || b.has("爸爸") {
 		t.Fatal("deleting the file unblocks everything")
 	}
 }

@@ -6,6 +6,29 @@ import (
 	"time"
 )
 
+func TestCallsDad(t *testing.T) {
+	for _, s := range []string{"爸爸", "叫爸爸？想得美", "粑粑", "爸比~", "老爸", "叫爹", "义父！"} {
+		if !CallsDad(s) {
+			t.Errorf("%q must be caught", s)
+		}
+	}
+	for _, s := range []string{"乱认亲戚可不行", "你爸妈知道吗", "上午大家在复读", "好的哦~"} {
+		if CallsDad(s) {
+			t.Errorf("%q must pass", s)
+		}
+	}
+	if !strings.Contains(Persona(nil, "", "", nil, true), "从来不认爹") {
+		t.Fatal("persona must forbid calling anyone dad")
+	}
+	r := &Request{sender: "丙(3)", text: "上午复读叫什么？两个字回答我", isatme: true}
+	r.AddGroupRules(false)
+	r.SetRetryHint(DadHint)
+	fu := r.finalUser()
+	if !strings.HasSuffix(fu, DadHint+reminder) || strings.Index(fu, DadHint) < strings.Index(fu, "不要假装已经禁言") {
+		t.Fatalf("retry hint goes right before the reminder:\n%s", fu)
+	}
+}
+
 func TestNowLine(t *testing.T) {
 	// 2026-10-08 23:59 北京时间 = 15:59 UTC, 与服务器时区无关
 	now := time.Date(2026, 10, 8, 15, 59, 0, 0, time.UTC)

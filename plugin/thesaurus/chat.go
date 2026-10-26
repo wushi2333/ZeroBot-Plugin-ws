@@ -28,7 +28,8 @@ func init() {
 		DisableOnDefault: false,
 		Brief:            "词典匹配回复, 仅@触发",
 		Help: "- @bot 随便说点什么\n" +
-			"- 不想要的回复写进 data/Chat/kimoi_block.json (JSON 字符串数组, 改完自动生效), 被屏蔽的回复不发, 交给 AI 回答",
+			"- 不想要的回复写进 data/Chat/kimoi_block.json, 改完自动生效, 被屏蔽的回复不发, 交给 AI 回答:\n" +
+			"  {\"replies\": [整句屏蔽...], \"words\": [含这些词就屏蔽...]} (也可以只写整句的字符串数组)",
 		PublicDataFolder: "Chat",
 	})
 	blocked := &blocklist{path: engine.DataFolder() + "kimoi_block.json"}
@@ -87,31 +88,46 @@ func chat(msg string) (kimoi.Response, error) {
 	}
 }
 
-// blocklist 屏蔽的 kimoi 回复, 文件改动后自动重新加载
+// blocklist 屏蔽的 kimoi 回复, 文件改动后自动重新加载.
+// 文件是 JSON: 字符串数组 (整句屏蔽), 或 {"replies": [整句...], "words": [含这些词就屏蔽...]}
 type blocklist struct {
-	mu   sync.Mutex
-	path string
-	mod  time.Time
-	set  map[string]struct{}
+	mu    sync.Mutex
+	path  string
+	mod   time.Time
+	set   map[string]struct{}
+	words []string
+}
+
+type blockfile struct {
+	Replies []string `json:"replies"`
+	Words   []string `json:"words"`
 }
 
 func norm(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// has 回复是否被屏蔽 (忽略首尾和连续空白的差异)
+// has 回复是否被屏蔽: 整句命中 (忽略首尾和连续空白的差异), 或含有屏蔽词
 func (b *blocklist) has(reply string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	fi, err := os.Stat(b.path)
 	switch {
 	case err != nil:
-		b.set, b.mod = nil, time.Time{}
+		b.set, b.words, b.mod = nil, nil, time.Time{}
 	case !fi.ModTime().Equal(b.mod):
 		b.load(fi.ModTime())
 	}
-	_, ok := b.set[norm(reply)]
-	return ok
+	r := norm(reply)
+	if _, ok := b.set[r]; ok {
+		return true
+	}
+	for _, w := range b.words {
+		if strings.Contains(r, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // load 读取失败或格式不对时保留原来的列表, 免得改坏文件后屏蔽全部失效
@@ -121,18 +137,27 @@ func (b *blocklist) load(mod time.Time) {
 		logrus.Warnln("[thesaurus] read", b.path, "err:", err)
 		return
 	}
-	var list []string
-	if err := json.Unmarshal(data, &list); err != nil {
-		logrus.Warnln("[thesaurus] parse", b.path, "err:", err)
-		b.mod = mod // 同一份坏文件不反复报错
-		return
+	var f blockfile
+	if err := json.Unmarshal(data, &f.Replies); err != nil {
+		f = blockfile{}
+		if err := json.Unmarshal(data, &f); err != nil {
+			logrus.Warnln("[thesaurus] parse", b.path, "err:", err)
+			b.mod = mod // 同一份坏文件不反复报错
+			return
+		}
 	}
-	set := make(map[string]struct{}, len(list))
-	for _, s := range list {
+	set := make(map[string]struct{}, len(f.Replies))
+	for _, s := range f.Replies {
 		if s = norm(s); s != "" {
 			set[s] = struct{}{}
 		}
 	}
-	b.set, b.mod = set, mod
-	logrus.Infoln("[thesaurus] loaded", len(set), "blocked kimoi replies")
+	words := make([]string, 0, len(f.Words))
+	for _, w := range f.Words {
+		if w = norm(w); w != "" {
+			words = append(words, w)
+		}
+	}
+	b.set, b.words, b.mod = set, words, mod
+	logrus.Infoln("[thesaurus] loaded", len(set), "blocked kimoi replies and", len(words), "blocked words")
 }

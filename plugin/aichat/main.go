@@ -298,7 +298,7 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 	}
 	txt := ""
 	var acts []focus.Action
-	// 回复自曝 AI 身份时重试一次, 仍然自曝就不发; 搜索那一轮不算重试
+	// 回复自曝 AI 身份或认爹时重试一次, 仍然不合格就不发; 搜索那一轮不算重试
 	for try := 0; try < 2; try++ {
 		data, err := ask()
 		if err != nil {
@@ -326,11 +326,17 @@ func focusChat(ctx *zero.Ctx, stor chat.Storage, gid int64, temperature, topp fl
 		// 先取出动作标记再清洗, Sanitize 会按 "]" "】" 截断文本
 		clean, a := req.ParseActions(data)
 		txt = focus.Clamp(chat.Sanitize(strings.Trim(clean, "\n 　")))
-		if !focus.LeaksAI(txt) {
+		leak, dad := focus.LeaksAI(txt), focus.CallsDad(txt)
+		if !leak && !dad {
 			acts = a
 			break
 		}
-		logrus.Infoln("[aichat] focus reply leaks AI identity, try", try+1, ":", txt)
+		if dad { // 被话术骗着认爹: 带上提醒重试一次, 仍然认爹就不发
+			logrus.Infoln("[aichat] focus reply calls someone dad, try", try+1, ":", txt)
+			req.SetRetryHint(focus.DadHint)
+		} else {
+			logrus.Infoln("[aichat] focus reply leaks AI identity, try", try+1, ":", txt)
+		}
 		txt = ""
 	}
 	if focus.RepliedByOthers(ctx) || (len(txt) == 0 && len(acts) == 0) {
