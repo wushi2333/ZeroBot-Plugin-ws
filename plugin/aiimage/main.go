@@ -3,6 +3,7 @@ package aiimage
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,13 @@ import (
 	"image/png"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -73,14 +76,19 @@ var (
 	errNoEditSupp = errors.New("当前画图接口不支持图生图")
 )
 
-// apiError 画图接口返回的错误
+// apiError 画图接口返回的错误 (new-api / OpenAI: {"error":{"message","type","code"}})
 type apiError struct {
 	status int
+	code   string
 	msg    string
 }
 
 func (e *apiError) Error() string {
-	return "HTTP " + strconv.Itoa(e.status) + ": " + e.msg
+	s := "HTTP " + strconv.Itoa(e.status)
+	if e.code != "" {
+		s += " [" + e.code + "]"
+	}
+	return s + ": " + e.msg
 }
 
 func init() {
@@ -181,10 +189,10 @@ func init() {
 				return
 			}
 			uid, gid, owner := ctx.Event.UserID, ctx.Event.GroupID, zero.SuperUserPermission(ctx)
-			var day, left int64
+			var day int64
 			if !owner {
 				var ok bool
-				if day, left, ok = sdb.reserve(uid, time.Now(), dailyLimit); !ok {
+				if day, ok = sdb.reserve(uid, time.Now()); !ok {
 					reply("你今天的 " + strconv.Itoa(dailyLimit) + " 张已经画完啦，明天再来吧")
 					return
 				}
@@ -202,11 +210,24 @@ func init() {
 			if len(inputs) > 0 {
 				ack = "收到，正在照着这 " + strconv.Itoa(len(inputs)) + " 张图改"
 			}
-			ack += "，大概要一两分钟"
-			if !owner {
-				ack += "（今天还能再画 " + strconv.FormatInt(left, 10) + " 张）"
+			reply(ack + "，大概要一两分钟，画好了会@你")
+			// 画完 (或失败) 时引用原消息并 @ 他; 剩几张按那时算, 正在画的也算用掉
+			done := func(chain ...message.Segment) {
+				head := message.Message{message.Reply(msgid)}
+				if gid != 0 {
+					head = append(head, message.At(uid), message.Text(" "))
+				}
+				ctx.SendChain(append(head, chain...)...)
 			}
-			reply(ack)
+			leftText := func() string {
+				if owner {
+					return ""
+				}
+				if n := dailyLimit - sdb.used(uid, time.Now()); n > 0 {
+					return "今天还能再画 " + strconv.FormatInt(n, 10) + " 张"
+				}
+				return "今天的 " + strconv.Itoa(dailyLimit) + " 张已经用完啦"
+			}
 			// 在后台画, 画好一张发一张; 处理器马上返回, 不占 ZeroBot 的处理时限
 			go func() {
 				defer func() { <-slots }()
@@ -222,11 +243,26 @@ func init() {
 					if !owner {
 						sdb.refund(uid, day)
 					}
-					logrus.Warnln("[aiimage] draw for", uid, "in", gid, "inputs", len(inputs), "failed after", time.Since(start).Round(time.Second), ":", err)
-					reply(errText(err))
+					kind := classify(err)
+					logrus.Warnln("[aiimage] draw for", uid, "in", gid, "inputs", len(inputs), "failed after", time.Since(start).Round(time.Second), "kind", kind, ":", err)
+					text := errText(err) + "（这次不算次数"
+					if l := leftText(); l != "" {
+						text += "，" + l
+					}
+					text += "）"
+					if owner { // 主人看得到原始报错, 方便排查
+						text += "\n原始错误：" + cutRunes(err.Error(), 200)
+					} else {
+						notifyOwners(ctx, kind, err, gid, uid)
+					}
+					done(message.Text(text))
 					return
 				}
-				ctx.SendChain(message.Reply(msgid), message.Image(img))
+				chain := []message.Segment{message.Image(img)}
+				if l := leftText(); l != "" {
+					chain = append(chain, message.Text("画好啦，"+l))
+				}
+				done(chain...)
 				logrus.Infoln("[aiimage] drew for", uid, "in", gid, "size", size, "inputs", len(inputs), "took", time.Since(start).Round(time.Second))
 			}()
 		})
@@ -322,15 +358,7 @@ type inImage struct {
 	ext  string
 }
 
-// fetchInput 下载一张参考图, 只留接口支持的 png/jpeg/webp; gif 取第一帧转成 png
-func fetchInput(u string, get func(string) ([]byte, error)) (inImage, error) {
-	b, err := get(u)
-	if err != nil {
-		return inImage{}, err
-	}
-	return normalizeInput(b)
-}
-
+// normalizeInput 只留接口支持的 png/jpeg/webp; gif 取第一帧转成 png
 func normalizeInput(b []byte) (inImage, error) {
 	switch {
 	case bytes.HasPrefix(b, []byte("\x89PNG")):
@@ -379,7 +407,12 @@ func getQQImage(u string) ([]byte, error) {
 var fetchInputs = func(urls []string) ([]inImage, error) {
 	ims := make([]inImage, 0, len(urls))
 	for _, u := range urls {
-		im, err := fetchInput(u, getQQImage)
+		b, err := getQQImage(u)
+		if err != nil {
+			logrus.Infoln("[aiimage] skip input image:", err)
+			continue
+		}
+		im, err := normalizeInput(b)
 		if err != nil {
 			logrus.Infoln("[aiimage] skip input image:", err)
 			continue
@@ -477,14 +510,19 @@ func buildEdit(model, prompt, size string, ims []inImage) (*bytes.Buffer, string
 	return buf, w.FormDataContentType(), nil
 }
 
-// parseResponse 取第一张图: OpenAI 的 data[].b64_json / data[].url, 或 SiliconFlow 的 images[].url
-func parseResponse(data []byte) (b64, url, errmsg string) {
+// parseResponse 取第一张图: OpenAI 的 data[].b64_json / data[].url, 或 SiliconFlow 的 images[].url.
+// 有 error 字段时返回其中的 code 和 message (status 由调用方填)
+func parseResponse(data []byte) (b64, url string, ae *apiError) {
 	j := gjson.ParseBytes(data)
 	if e := j.Get("error"); e.Exists() {
-		if m := e.Get("message").String(); m != "" {
-			return "", "", m
+		ae = &apiError{code: e.Get("code").String(), msg: e.Get("message").String()}
+		if ae.code == "" {
+			ae.code = e.Get("type").String()
 		}
-		return "", "", e.String()
+		if ae.msg == "" {
+			ae.msg = e.String()
+		}
+		return "", "", ae
 	}
 	for _, key := range []string{"data", "images"} {
 		first := j.Get(key + ".0")
@@ -495,9 +533,9 @@ func parseResponse(data []byte) (b64, url, errmsg string) {
 		if i := strings.Index(b64, "base64,"); strings.HasPrefix(b64, "data:") && i >= 0 {
 			b64 = b64[i+len("base64,"):]
 		}
-		return b64, first.Get("url").String(), ""
+		return b64, first.Get("url").String(), nil
 	}
-	return "", "", ""
+	return "", "", nil
 }
 
 // generate 文生图, 返回可直接发送的图片 (base64:// 或 url)
@@ -543,12 +581,13 @@ func send(cfg imageConfig, req *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	b64, url, errmsg := parseResponse(data)
-	if resp.StatusCode != http.StatusOK || errmsg != "" {
-		if errmsg == "" {
-			errmsg = strings.TrimSpace(string(data))
+	b64, url, ae := parseResponse(data)
+	if resp.StatusCode != http.StatusOK || ae != nil {
+		if ae == nil {
+			ae = &apiError{msg: strings.TrimSpace(string(data))}
 		}
-		return "", &apiError{status: resp.StatusCode, msg: errmsg}
+		ae.status = resp.StatusCode
+		return "", ae
 	}
 	if b64 != "" {
 		return "base64://" + b64, nil
@@ -582,37 +621,169 @@ func download(url string) ([]byte, error) {
 	return b, nil
 }
 
-// errText 给群友看的失败原因 (失败不计次数)
-func errText(err error) string {
+// ---------- 失败处理 ----------
+
+// errKind 失败的种类: 决定给群友看什么, 要不要私聊告诉主人
+type errKind string
+
+const (
+	kindQuota      errKind = "quota"      // 中转站余额/额度不足
+	kindAuth       errKind = "auth"       // 密钥无效/过期/被禁用
+	kindModel      errKind = "model"      // 模型不可用 (无可用渠道)
+	kindModeration errKind = "moderation" // 审核不通过 (敏感内容/版权角色)
+	kindBusy       errKind = "busy"       // 限流/上游负载满
+	kindUpstream   errKind = "upstream"   // 上游 5xx
+	kindTimeout    errKind = "timeout"    // 5 分钟没画完
+	kindNetwork    errKind = "network"    // 连不上接口
+	kindNoImage    errKind = "noimage"    // 200 但没有图
+	kindBadInput   errKind = "badinput"   // 参考图有问题
+	kindConfig     errKind = "config"     // 配置问题 (接口地址)
+	kindOther      errKind = "other"
+)
+
+func hasAny(s string, words ...string) bool {
+	for _, w := range words {
+		if strings.Contains(s, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// classify 先看错误码, 再看报错文字, 最后看 HTTP 状态码. 顺序有讲究:
+// new-api 余额不足是 403, OpenAI 额度用完是 429, 无可用渠道是 503, 都不能只看状态码
+func classify(err error) errKind {
 	var ae *apiError
 	if errors.As(err, &ae) {
-		m := strings.ToLower(ae.msg)
+		m := strings.ToLower(ae.code + " " + ae.msg)
 		switch {
-		case ae.status == http.StatusUnauthorized || (ae.status == http.StatusForbidden && !strings.Contains(m, "safety")):
-			return "画图接口的密钥不对或没有权限，需要主人检查一下设置（这次不算次数）"
-		case strings.Contains(m, "moderation") || strings.Contains(m, "safety") || strings.Contains(m, "content_policy") ||
-			strings.Contains(m, "content policy") || strings.Contains(m, "违规") || strings.Contains(m, "敏感"):
-			return "这个描述或图片没通过审核，换个试试（这次不算次数）"
-		case ae.status == http.StatusTooManyRequests || ae.status == http.StatusServiceUnavailable:
-			return "画图接口现在太忙了，过会儿再试试（这次不算次数）"
+		case hasAny(m, "insufficient_user_quota", "insufficient_quota", "billing", "pre_consume", "quota",
+			"额度", "余额", "欠费", "insufficient balance", "credit"):
+			return kindQuota
+		case ae.status == http.StatusUnauthorized || hasAny(m, "invalid token", "invalid_api_key", "incorrect api key",
+			"invalid api key", "无效的令牌", "令牌已过期", "令牌已被禁用", "令牌状态不可用", "unauthorized"):
+			return kindAuth
+		case hasAny(m, "model_not_found", "无可用渠道", "no available channel", "does not exist", "模型不存在"):
+			return kindModel
+		case hasAny(m, "moderation", "safety", "content_policy", "content policy", "content_filter", "content filter",
+			"policy violation", "violat", "copyright", "trademark", "blocked by", "rejected by",
+			"违规", "敏感", "审核", "版权", "违禁", "不合规", "不当内容", "安全策略"):
+			return kindModeration
+		case ae.status == http.StatusTooManyRequests || ae.status == http.StatusServiceUnavailable ||
+			hasAny(m, "rate limit", "rate_limit", "overloaded", "too many requests", "负载", "饱和", "繁忙", "限流"):
+			return kindBusy
+		case ae.status >= 500:
+			return kindUpstream
 		case ae.status == http.StatusNotFound || ae.status == http.StatusMethodNotAllowed:
-			return "画图接口不支持这个操作（这次不算次数）"
+			return kindConfig
 		}
-		msg := ae.msg
-		if utf8.RuneCountInString(msg) > 80 {
-			msg = string([]rune(msg)[:80]) + "…"
-		}
-		return "画图失败了：" + msg + "（这次不算次数）"
+		return kindOther
 	}
+	var ne net.Error
 	switch {
 	case errors.Is(err, errNoImage):
-		return "接口没有返回图片，过会儿再试试（这次不算次数）"
+		return kindNoImage
 	case errors.Is(err, errBadInput):
-		return "参考图下载不了或者格式不支持，换张图试试（这次不算次数）"
+		return kindBadInput
 	case errors.Is(err, errNoEditURL):
-		return errNoEditURL.Error() + "（这次不算次数）"
-	case strings.Contains(err.Error(), "Client.Timeout") || strings.Contains(err.Error(), "deadline exceeded"):
-		return "画了 5 分钟还没画好，超时了，过会儿再试试（这次不算次数）"
+		return kindConfig
+	case errors.As(err, &ne) && ne.Timeout(), errors.Is(err, context.DeadlineExceeded):
+		return kindTimeout
+	case errors.As(err, &ne):
+		return kindNetwork
 	}
-	return "画图失败了，过会儿再试试（这次不算次数）"
+	return kindOther
+}
+
+// errText 给群友看的失败原因 (调用方补上"这次不算次数")
+func errText(err error) string {
+	switch classify(err) {
+	case kindQuota:
+		return "画图接口的额度用完了，已经告诉主人了，充值之前暂时画不了"
+	case kindAuth:
+		return "画图接口的密钥失效了，已经告诉主人了"
+	case kindModel:
+		return "画图模型暂时用不了，已经告诉主人了，过会儿再试试"
+	case kindModeration:
+		return "这个描述或图片没通过审核，可能涉及敏感内容或者版权角色，换个说法试试"
+	case kindBusy:
+		return "画图接口现在太忙了，过会儿再试试"
+	case kindUpstream:
+		return "画图接口那边出错了，过会儿再试试"
+	case kindTimeout:
+		return "画了 5 分钟还没画好，超时了，过会儿再试试"
+	case kindNetwork:
+		return "连不上画图接口，过会儿再试试"
+	case kindNoImage:
+		return "接口没有返回图片，可能是内容被拒了，换个说法试试"
+	case kindBadInput:
+		return "参考图下载不了或者格式不支持，换张图试试"
+	case kindConfig:
+		if errors.Is(err, errNoEditURL) {
+			return errNoEditURL.Error()
+		}
+		return "画图接口不支持这个操作，需要主人检查一下接口地址"
+	}
+	var ae *apiError
+	if errors.As(err, &ae) && ae.msg != "" {
+		return "画图失败了：" + cutRunes(ae.msg, 80)
+	}
+	return "画图失败了，过会儿再试试"
+}
+
+func cutRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "…"
+}
+
+// ownerNote 需要主人处理的问题, 私聊告诉主人; 其余返回空
+func ownerNote(k errKind) string {
+	switch k {
+	case kindQuota:
+		return "画图接口额度不足，需要去中转站充值"
+	case kindAuth:
+		return "画图接口的密钥失效了，需要私聊我重新设置AI画图密钥"
+	case kindModel:
+		return "画图模型在中转站上没有可用渠道，可能需要换模型名"
+	case kindConfig:
+		return "画图接口地址可能不对"
+	}
+	return ""
+}
+
+const noteInterval = 30 * time.Minute
+
+var (
+	notemu sync.Mutex
+	noted  = map[errKind]time.Time{}
+)
+
+// shouldNote 同一类问题 30 分钟内只提醒主人一次
+func shouldNote(k errKind, now time.Time) bool {
+	notemu.Lock()
+	defer notemu.Unlock()
+	if t, ok := noted[k]; ok && now.Sub(t) < noteInterval {
+		return false
+	}
+	noted[k] = now
+	return true
+}
+
+// notifyOwners 群友画图失败且需要主人处理时, 私聊每个主人
+func notifyOwners(ctx *zero.Ctx, k errKind, err error, gid, uid int64) {
+	note := ownerNote(k)
+	if note == "" || !shouldNote(k, time.Now()) {
+		return
+	}
+	where := "私聊"
+	if gid != 0 {
+		where = "群 " + strconv.FormatInt(gid, 10)
+	}
+	text := "【AI画图】" + note + "\n原始错误：" + cutRunes(err.Error(), 200) +
+		"\n（" + where + " 里 " + strconv.FormatInt(uid, 10) + " 的请求失败了，次数已退还；同类问题 30 分钟内不再重复提醒）"
+	for _, su := range zero.BotConfig.SuperUsers {
+		ctx.SendPrivateMessage(su, message.Text(text))
+	}
 }

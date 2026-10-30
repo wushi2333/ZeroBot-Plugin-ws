@@ -12,8 +12,10 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -237,13 +239,78 @@ func TestGenerateAndEdit(t *testing.T) {
 
 	cfg.APIKey = "bad"
 	_, err = generate(cfg, "一只猫", "")
-	if err == nil || !strings.Contains(errText(err), "密钥不对") {
-		t.Fatalf("auth: %v %q", err, errText(err))
+	if classify(err) != kindAuth || !strings.Contains(err.Error(), "new_api_error") {
+		t.Fatalf("auth: %v %s", err, classify(err))
 	}
-	for _, s := range []string{errText(err), errText(errNoImage), errText(errBadInput), errText(errors.New("x"))} {
-		if !strings.Contains(s, "不算次数") {
-			t.Fatalf("every failure must say it is not counted: %q", s)
+}
+
+type fakeTimeout struct{}
+
+func (fakeTimeout) Error() string   { return "Client.Timeout exceeded" }
+func (fakeTimeout) Timeout() bool   { return true }
+func (fakeTimeout) Temporary() bool { return true }
+
+func TestClassify(t *testing.T) {
+	ae := func(status int, body string) error {
+		_, _, e := parseResponse([]byte(body))
+		if e == nil {
+			e = &apiError{msg: body}
 		}
+		e.status = status
+		return e
+	}
+	for _, c := range []struct {
+		err  error
+		want errKind
+	}{
+		// 实测: 中转站上不存在的模型
+		{ae(503, `{"error":{"code":"model_not_found","message":"分组 【生图】1K 2K 4K 下模型 gpt-image-2.5-不超分-不存在 无可用渠道（distributor）","type":"new_api_error"}}`), kindModel},
+		// new-api 余额不足是 403, 不能当成密钥问题
+		{ae(403, `{"error":{"code":"insufficient_user_quota","message":"用户额度不足, 剩余额度: ＄0.0012","type":"new_api_error"}}`), kindQuota},
+		{ae(403, `{"error":{"code":"pre_consume_token_quota_failed","message":"预扣费额度失败, 用户剩余额度: ＄0.01, 需要预扣费额度: ＄0.19","type":"new_api_error"}}`), kindQuota},
+		{ae(401, `{"error":{"message":"该令牌额度已用尽 TokenStatusExhausted[sk-a***bc12]","type":"new_api_error"}}`), kindQuota},
+		// OpenAI 额度用完是 429, 不能当成太忙
+		{ae(429, `{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}`), kindQuota},
+		{ae(401, `{"error":{"code":"","message":"Invalid token (request id: 2026…)","type":"new_api_error"}}`), kindAuth},
+		{ae(401, `{"error":{"message":"该令牌已过期","type":"new_api_error"}}`), kindAuth},
+		{ae(400, `{"error":{"message":"Your request was rejected by the safety system. If you believe this is an error, contact us.","type":"image_generation_user_error","code":"moderation_blocked"}}`), kindModeration},
+		{ae(400, `{"error":{"message":"生成内容涉及版权角色，请修改提示词","type":"upstream_error"}}`), kindModeration},
+		{ae(400, `{"error":{"message":"This request has been blocked by our content filters.","code":"content_policy_violation"}}`), kindModeration},
+		{ae(503, `{"error":{"message":"当前分组上游负载已饱和，请稍后再试","type":"new_api_error"}}`), kindBusy},
+		{ae(429, `{"error":{"message":"Rate limit reached for images per minute","code":"rate_limit_exceeded"}}`), kindBusy},
+		{ae(502, `<html>502 Bad Gateway</html>`), kindUpstream},
+		{ae(404, `404 page not found`), kindConfig},
+		{ae(400, `{"error":{"message":"Invalid value: '123x456'. Supported values are: '1024x1024', '1024x1536'"}}`), kindOther},
+		{&url.Error{Op: "Post", URL: "https://z1rry.cyou", Err: fakeTimeout{}}, kindTimeout},
+		{&url.Error{Op: "Post", URL: "https://z1rry.cyou", Err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}}, kindNetwork},
+		{errNoImage, kindNoImage},
+		{errBadInput, kindBadInput},
+		{errNoEditURL, kindConfig},
+		{errors.New("x"), kindOther},
+	} {
+		if got := classify(c.err); got != c.want {
+			t.Errorf("classify(%v) = %s, want %s", c.err, got, c.want)
+		}
+		if errText(c.err) == "" {
+			t.Errorf("no text for %v", c.err)
+		}
+	}
+	if s := errText(ae(400, `{"error":{"message":"Invalid value: '123x456'"}}`)); !strings.Contains(s, "123x456") {
+		t.Fatalf("unknown errors show the relay's message: %q", s)
+	}
+	// 只有要主人处理的才私聊主人
+	for k, want := range map[errKind]bool{kindQuota: true, kindAuth: true, kindModel: true, kindConfig: true,
+		kindModeration: false, kindBusy: false, kindTimeout: false, kindBadInput: false} {
+		if (ownerNote(k) != "") != want {
+			t.Errorf("ownerNote(%s) notify=%v, want %v", k, !want, want)
+		}
+	}
+	now := time.Now()
+	if !shouldNote(kindQuota, now) || shouldNote(kindQuota, now.Add(10*time.Minute)) || !shouldNote(kindAuth, now) {
+		t.Fatal("same kind is reported once per 30 min, kinds are independent")
+	}
+	if !shouldNote(kindQuota, now.Add(31*time.Minute)) {
+		t.Fatal("reported again after 30 min")
 	}
 }
 
@@ -264,27 +331,26 @@ func TestReserveRefundAndConfig(t *testing.T) {
 	d2 := d1.Add(2 * time.Minute)
 	var day int64
 	for i := int64(1); i <= dailyLimit; i++ {
-		var left int64
 		var ok bool
-		day, left, ok = sdb.reserve(7, d1, dailyLimit)
-		if !ok || left != dailyLimit-i {
-			t.Fatalf("reserve %d: ok=%v left=%d", i, ok, left)
+		day, ok = sdb.reserve(7, d1)
+		if !ok || sdb.used(7, d1) != i {
+			t.Fatalf("reserve %d: ok=%v used=%d", i, ok, sdb.used(7, d1))
 		}
 	}
-	if _, _, ok := sdb.reserve(7, d1, dailyLimit); ok {
+	if _, ok := sdb.reserve(7, d1); ok {
 		t.Fatal("parallel requests must not exceed the daily limit")
 	}
 	sdb.refund(7, day)
 	if sdb.used(7, d1) != dailyLimit-1 {
 		t.Fatal("a failed image gives its slot back")
 	}
-	if _, _, ok := sdb.reserve(7, d1, dailyLimit); !ok {
+	if _, ok := sdb.reserve(7, d1); !ok {
 		t.Fatal("refunded slot can be used again")
 	}
 	if sdb.used(8, d1) != 0 || sdb.used(7, d2) != 0 {
 		t.Fatal("usage is per user and resets at Beijing midnight")
 	}
-	if _, left, ok := sdb.reserve(7, d2, dailyLimit); !ok || left != dailyLimit-1 {
+	if _, ok := sdb.reserve(7, d2); !ok || sdb.used(7, d2) != 1 {
 		t.Fatal("new day starts from zero")
 	}
 	sdb.refund(7, day) // 昨天的单今天才失败: 不能扣今天的

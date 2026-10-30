@@ -70,8 +70,8 @@ func (sdb *storage) used(uid int64, now time.Time) int64 {
 	return u.Count
 }
 
-// reserve 接单时先占一个名额, 这样同时发很多条也超不过上限. 返回占用的日期和占用后还剩几张
-func (sdb *storage) reserve(uid int64, now time.Time, limit int64) (day, left int64, ok bool) {
+// reserve 接单时先占一个名额, 这样同时发很多条也超不过上限. 返回占用的日期 (退还时要用)
+func (sdb *storage) reserve(uid int64, now time.Time) (day int64, ok bool) {
 	sdb.Lock()
 	defer sdb.Unlock()
 	day = today(now)
@@ -79,14 +79,11 @@ func (sdb *storage) reserve(uid int64, now time.Time, limit int64) (day, left in
 	if err := sdb.db.Find("usage", &u, "WHERE uid = ?", uid); err != nil || u.Day != day {
 		u = usage{UID: uid, Day: day}
 	}
-	if u.Count >= limit {
-		return day, 0, false
+	if u.Count >= dailyLimit {
+		return day, false
 	}
 	u.Count++
-	if err := sdb.db.Insert("usage", &u); err != nil {
-		return day, 0, false
-	}
-	return day, limit - u.Count, true
+	return day, sdb.db.Insert("usage", &u) == nil
 }
 
 // refund 画失败了把名额还回去 (已经跨天就不用还了)
