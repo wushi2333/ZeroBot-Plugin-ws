@@ -101,6 +101,7 @@ func init() {
 		Help: "- AI画图 [描述]\n" +
 			"- AI画图 竖 [描述] / AI画图 横 [描述] (竖图 1024x1536, 横图 1536x1024, 默认方图)\n" +
 			"- 图生图: 发图时带上 AI画图 [怎么改], 或者引用一条带图的消息再发 AI画图 [怎么改] (最多参考 " + strconv.Itoa(maxInputs) + " 张)\n" +
+			"- 多张参考图按顺序编号 (引用的图在前, 再按这条消息里的顺序), 例如一条消息发两张图: AI画图 用第一张图的姿势, 画第二张图里的角色\n" +
 			"- 每人每天 " + strconv.Itoa(dailyLimit) + " 张 (画失败不算), 主人不限; 可以连着发, 画好一张发一张\n" +
 			"- 设置AI画图密钥xxx\n" +
 			"- 设置AI画图接口地址https://api.openai.com/v1/images/generations (也支持 SiliconFlow 文生图)\n" +
@@ -312,7 +313,8 @@ func parseArgs(s string) (size, prompt string) {
 
 // ---------- 参考图 ----------
 
-// inputImages 当前消息和被引用消息里的图片地址 (最多 maxInputs 张)
+// inputImages 参考图地址 (最多 maxInputs 张), 按时间先后排: 被引用消息里的图在前, 再是这条消息里的图.
+// 描述里说的"第一张""第二张"就是这个顺序
 func inputImages(ctx *zero.Ctx) []string {
 	out := make([]string, 0, maxInputs)
 	add := func(m message.Message) {
@@ -324,7 +326,6 @@ func inputImages(ctx *zero.Ctx) []string {
 			}
 		}
 	}
-	add(ctx.Event.Message)
 	for _, seg := range ctx.Event.Message {
 		if seg.Type != "reply" {
 			continue
@@ -334,7 +335,18 @@ func inputImages(ctx *zero.Ctx) []string {
 		}
 		break
 	}
+	add(ctx.Event.Message)
 	return out
+}
+
+// orderHint 多张参考图时告诉模型图的顺序, 让"第一张的姿势、第二张的角色"对得上
+func orderHint(prompt string, n int) string {
+	if n < 2 {
+		return prompt
+	}
+	return prompt + "\n\n（参考图共 " + strconv.Itoa(n) + " 张，按上传顺序依次是第1张到第" + strconv.Itoa(n) +
+		"张；上面说的“第一张”“第二张”“图1”“图2”就是指这个顺序。Reference images are given in order: image 1 to image " +
+		strconv.Itoa(n) + ".）"
 }
 
 // qqImageURL 只下载 QQ 自己图床上的图
@@ -403,21 +415,20 @@ func getQQImage(u string) ([]byte, error) {
 	return b, nil
 }
 
-// fetchInputs 用于测试替换
+// fetchInputs 下载全部参考图; 任何一张不行就整次失败, 不能跳过, 否则"第一张""第二张"会错位. 测试时可替换
 var fetchInputs = func(urls []string) ([]inImage, error) {
 	ims := make([]inImage, 0, len(urls))
-	for _, u := range urls {
+	for i, u := range urls {
 		b, err := getQQImage(u)
-		if err != nil {
-			logrus.Infoln("[aiimage] skip input image:", err)
-			continue
+		if err == nil {
+			var im inImage
+			if im, err = normalizeInput(b); err == nil {
+				ims = append(ims, im)
+				continue
+			}
 		}
-		im, err := normalizeInput(b)
-		if err != nil {
-			logrus.Infoln("[aiimage] skip input image:", err)
-			continue
-		}
-		ims = append(ims, im)
+		logrus.Infoln("[aiimage] input image", i+1, "of", len(urls), "unusable:", err)
+		return nil, errBadInput
 	}
 	if len(ims) == 0 {
 		return nil, errBadInput
@@ -558,7 +569,7 @@ func edit(cfg imageConfig, prompt, size string, urls []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	body, ctype, err := buildEdit(cfg.ModelName, prompt, size, ims)
+	body, ctype, err := buildEdit(cfg.ModelName, orderHint(prompt, len(ims)), size, ims)
 	if err != nil {
 		return "", err
 	}
@@ -723,10 +734,11 @@ func errText(err error) string {
 			return errNoEditURL.Error()
 		}
 		return "画图接口不支持这个操作，需要主人检查一下接口地址"
-	}
-	var ae *apiError
-	if errors.As(err, &ae) && ae.msg != "" {
-		return "画图失败了：" + cutRunes(ae.msg, 80)
+	case kindOther: // 没见过的错误: 直接给出中转站的报错
+		var ae *apiError
+		if errors.As(err, &ae) && ae.msg != "" {
+			return "画图失败了：" + cutRunes(ae.msg, 80)
+		}
 	}
 	return "画图失败了，过会儿再试试"
 }
@@ -749,6 +761,8 @@ func ownerNote(k errKind) string {
 		return "画图模型在中转站上没有可用渠道，可能需要换模型名"
 	case kindConfig:
 		return "画图接口地址可能不对"
+	case kindModeration, kindBusy, kindUpstream, kindTimeout, kindNetwork, kindNoImage, kindBadInput, kindOther:
+		// 群友换个说法或者过会儿再试就行, 不打扰主人
 	}
 	return ""
 }

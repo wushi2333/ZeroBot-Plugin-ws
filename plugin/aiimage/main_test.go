@@ -222,15 +222,18 @@ func TestGenerateAndEdit(t *testing.T) {
 	if err != nil || img != want || got["model"] != "gpt-image-2.5-不超分" || got["size"] != sizeAuto || got["n"] != "1" {
 		t.Fatalf("edit: %v %q %v", err, img, got)
 	}
-	if len(files) != 1 || files[0] != "image:input1.jpg:image/jpeg" {
-		t.Fatalf("single input goes in field image: %v", files)
+	if len(files) != 1 || files[0] != "image:input1.jpg:image/jpeg" || got["prompt"] != "换成冬天" {
+		t.Fatalf("single input goes in field image, prompt untouched: %v %v", files, got["prompt"])
 	}
 	files = nil
-	if _, err = edit(cfg, "拼在一起", sizeLandscape, []string{"u1", "u2"}); err != nil || got["size"] != sizeLandscape {
+	if _, err = edit(cfg, "用第一张图的姿势，画第二张图里的角色", sizeLandscape, []string{"u1", "u2"}); err != nil || got["size"] != sizeLandscape {
 		t.Fatalf("multi edit: %v %v", err, got)
 	}
-	if len(files) != 2 || !strings.HasPrefix(files[1], "image[]:input2.jpg") {
-		t.Fatalf("several inputs go in image[]: %v", files)
+	if len(files) != 2 || !strings.HasPrefix(files[0], "image[]:input1.jpg") || !strings.HasPrefix(files[1], "image[]:input2.jpg") {
+		t.Fatalf("several inputs go in image[] in order: %v", files)
+	}
+	if p, _ := got["prompt"].(string); !strings.HasPrefix(p, "用第一张图的姿势") || !strings.Contains(p, "参考图共 2 张") {
+		t.Fatalf("multi-image prompt must explain the order: %q", p)
 	}
 	fetchInputs = func([]string) ([]inImage, error) { return nil, errBadInput }
 	if _, err = edit(cfg, "x", "", []string{"u1"}); !strings.Contains(errText(err), "参考图") {
