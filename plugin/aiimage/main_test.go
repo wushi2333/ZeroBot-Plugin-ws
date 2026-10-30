@@ -62,6 +62,11 @@ func TestCmdRuleAndInputs(t *testing.T) {
 	if cmdRule(ctx) {
 		t.Fatal("command must be at the start of the text")
 	}
+	// 实测: 有人说"AI生图"
+	ctx.Event.Message = message.Message{message.At(3482259278), message.Text(" AI生图  奥特曼")}
+	if !cmdRule(ctx) || ctx.State["args"] != "奥特曼" {
+		t.Fatalf("AI生图 is an alias: %v", ctx.State["args"])
+	}
 	many := message.Message{message.Text("AI画图 拼起来")}
 	for i := 0; i < 6; i++ {
 		many = append(many, img)

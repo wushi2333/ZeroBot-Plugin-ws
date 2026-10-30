@@ -35,8 +35,10 @@ import (
 	"github.com/FloatTech/zbputils/control"
 )
 
+// cmds 触发画图的指令; 群里有人习惯说"AI生图"
+var cmds = []string{"AI画图", "AI生图"}
+
 const (
-	cmd         = "AI画图"
 	dailyLimit  = 4 // 每人每天能画几张, 主人不限
 	maxInflight = 8 // 全局同时最多画几张, 保护中转站和服务器内存
 	maxInputs   = 4 // 图生图最多参考几张图
@@ -98,7 +100,7 @@ func init() {
 		DisableOnDefault: false,
 		Extra:            control.ExtraFromString("aiimage"),
 		Brief:            "AI画图",
-		Help: "- AI画图 [描述]\n" +
+		Help: "- AI画图 [描述] (也可以说 AI生图)\n" +
 			"- AI画图 竖 [描述] / AI画图 横 [描述] (竖图 1024x1536, 横图 1536x1024, 默认方图)\n" +
 			"- 图生图: 发图时带上 AI画图 [怎么改], 或者引用一条带图的消息再发 AI画图 [怎么改] (最多参考 " + strconv.Itoa(maxInputs) + " 张)\n" +
 			"- 多张参考图按顺序编号 (引用的图在前, 再按这条消息里的顺序), 例如一条消息发两张图: AI画图 用第一张图的姿势, 画第二张图里的角色\n" +
@@ -269,14 +271,16 @@ func init() {
 		})
 }
 
-// cmdRule 消息文字以 AI画图 开头 (允许前面有引用、@、图片), 其余文字放进 args
+// cmdRule 消息文字以 AI画图/AI生图 开头 (允许前面有引用、@、图片), 其余文字放进 args
 func cmdRule(ctx *zero.Ctx) bool {
 	txt := strings.TrimSpace(ctx.ExtractPlainText())
-	if !strings.HasPrefix(txt, cmd) {
-		return false
+	for _, c := range cmds {
+		if strings.HasPrefix(txt, c) {
+			ctx.State["args"] = strings.TrimSpace(txt[len(c):])
+			return true
+		}
 	}
-	ctx.State["args"] = strings.TrimSpace(txt[len(cmd):])
-	return true
+	return false
 }
 
 // parseArgs 取出开头的 横/竖/方 并返回尺寸和描述; 没指定尺寸时 size 为空.
