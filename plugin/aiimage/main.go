@@ -678,7 +678,9 @@ func classify(err error) errKind {
 			return kindModel
 		case hasAny(m, "moderation", "safety", "content_policy", "content policy", "content_filter", "content filter",
 			"policy violation", "violat", "copyright", "trademark", "blocked by", "rejected by",
-			"违规", "敏感", "审核", "版权", "违禁", "不合规", "不当内容", "安全策略"):
+			"违规", "敏感", "审核", "版权", "违禁", "不合规", "不当内容", "安全策略",
+			// 实测中转站的审核拒绝: HTTP 502 "生成服务拒绝了请求，请检查提示词、参考图或模型参数后重试（积分已退还）"
+			"拒绝了请求", "拒绝生成", "检查提示词", "refused"):
 			return kindModeration
 		case ae.status == http.StatusTooManyRequests || ae.status == http.StatusServiceUnavailable ||
 			hasAny(m, "rate limit", "rate_limit", "overloaded", "too many requests", "负载", "饱和", "繁忙", "限流"):

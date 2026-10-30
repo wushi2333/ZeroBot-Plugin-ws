@@ -279,6 +279,8 @@ func TestClassify(t *testing.T) {
 		{ae(400, `{"error":{"message":"Your request was rejected by the safety system. If you believe this is an error, contact us.","type":"image_generation_user_error","code":"moderation_blocked"}}`), kindModeration},
 		{ae(400, `{"error":{"message":"生成内容涉及版权角色，请修改提示词","type":"upstream_error"}}`), kindModeration},
 		{ae(400, `{"error":{"message":"This request has been blocked by our content filters.","code":"content_policy_violation"}}`), kindModeration},
+		// 实测: 中转站对涩图请求的审核拒绝是 502, 不能当成上游故障
+		{ae(502, `{"error":{"code":"upstream_error","message":"生成服务拒绝了请求，请检查提示词、参考图或模型参数后重试（积分已退还）","type":"upstream_error"}}`), kindModeration},
 		{ae(503, `{"error":{"message":"当前分组上游负载已饱和，请稍后再试","type":"new_api_error"}}`), kindBusy},
 		{ae(429, `{"error":{"message":"Rate limit reached for images per minute","code":"rate_limit_exceeded"}}`), kindBusy},
 		{ae(502, `<html>502 Bad Gateway</html>`), kindUpstream},
