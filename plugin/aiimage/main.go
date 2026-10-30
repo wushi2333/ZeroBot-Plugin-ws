@@ -100,7 +100,7 @@ func init() {
 		DisableOnDefault: false,
 		Extra:            control.ExtraFromString("aiimage"),
 		Brief:            "AI画图",
-		Help: "- AI画图 [描述] (也可以说 AI生图)\n" +
+		Help: "- AI画图 [描述] (也可以说 AI生图, ai 小写也行)\n" +
 			"- AI画图 竖 [描述] / AI画图 横 [描述] (竖图 1024x1536, 横图 1536x1024, 默认方图)\n" +
 			"- 图生图: 发图时带上 AI画图 [怎么改], 或者引用一条带图的消息再发 AI画图 [怎么改] (最多参考 " + strconv.Itoa(maxInputs) + " 张)\n" +
 			"- 多张参考图按顺序编号 (引用的图在前, 再按这条消息里的顺序), 例如一条消息发两张图: AI画图 用第一张图的姿势, 画第二张图里的角色\n" +
@@ -271,11 +271,11 @@ func init() {
 		})
 }
 
-// cmdRule 消息文字以 AI画图/AI生图 开头 (允许前面有引用、@、图片), 其余文字放进 args
+// cmdRule 消息文字以 AI画图/AI生图 开头 (AI 不分大小写; 允许前面有引用、@、图片), 其余文字放进 args
 func cmdRule(ctx *zero.Ctx) bool {
 	txt := strings.TrimSpace(ctx.ExtractPlainText())
 	for _, c := range cmds {
-		if strings.HasPrefix(txt, c) {
+		if len(txt) >= len(c) && strings.EqualFold(txt[:len(c)], c) {
 			ctx.State["args"] = strings.TrimSpace(txt[len(c):])
 			return true
 		}

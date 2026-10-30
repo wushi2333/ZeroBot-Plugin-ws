@@ -62,10 +62,23 @@ func TestCmdRuleAndInputs(t *testing.T) {
 	if cmdRule(ctx) {
 		t.Fatal("command must be at the start of the text")
 	}
-	// 实测: 有人说"AI生图"
-	ctx.Event.Message = message.Message{message.At(3482259278), message.Text(" AI生图  奥特曼")}
-	if !cmdRule(ctx) || ctx.State["args"] != "奥特曼" {
-		t.Fatalf("AI生图 is an alias: %v", ctx.State["args"])
+	// 实测: 有人说"AI生图", 有人写小写"ai画图"
+	for in, args := range map[string]string{
+		" AI生图  奥特曼":   "奥特曼",
+		"ai画图，来个ds的画像": "，来个ds的画像",
+		"Ai生图 横 海边日落":  "横 海边日落",
+		"aI画图":         "",
+	} {
+		ctx.Event.Message = message.Message{message.At(3482259278), message.Text(in)}
+		if !cmdRule(ctx) || ctx.State["args"] != args {
+			t.Errorf("%q: args=%q, want %q", in, ctx.State["args"], args)
+		}
+	}
+	for _, in := range []string{"画图，画个doro", "AI 画图 猫", "ai", ""} {
+		ctx.Event.Message = message.Message{message.Text(in)}
+		if cmdRule(ctx) {
+			t.Errorf("%q must not match", in)
+		}
 	}
 	many := message.Message{message.Text("AI画图 拼起来")}
 	for i := 0; i < 6; i++ {
